@@ -1,0 +1,38 @@
+name: Scheduled Report Automations
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  scheduler:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+      
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # 🔥 FIX: create service account file
+      - name: Create service account file
+        run: |
+          echo '${{ secrets.SERVICE_ACCOUNT_JSON }}' > service_account.json
+      
+      - name: Run scheduler
+        env:
+          API_KEY: ${{ secrets.API_KEY }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          SERVICE_ACCOUNT_JSON: ${{ secrets.SERVICE_ACCOUNT_JSON }}
+          AUTOMATION_SHEET_URL: ${{ secrets.AUTOMATION_SHEET_URL }}
+        run: python scheduler.py
