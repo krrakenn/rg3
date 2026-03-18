@@ -47,6 +47,12 @@ if "result" not in st.session_state:
 if "sql" not in st.session_state:
     st.session_state.sql = None
 
+if "last_error" not in st.session_state:
+    st.session_state.last_error = None
+
+if "last_attempted_sql" not in st.session_state:
+    st.session_state.last_attempted_sql = None
+
 
 # -------------------------
 # UI STYLING
@@ -89,6 +95,8 @@ if "last_mode" not in st.session_state:
 if st.session_state.last_mode != mode_sql:
     st.session_state.result = None
     st.session_state.sql = None
+    st.session_state.last_error = None
+    st.session_state.last_attempted_sql = None
     st.session_state.last_mode = mode_sql
 
 st.divider()
@@ -180,6 +188,9 @@ country_code = 'IN'
 
     if run:
 
+        st.session_state.last_error = None
+        st.session_state.last_attempted_sql = None
+
         if not selected_tables:
             st.warning("Please select at least one table")
             st.stop()
@@ -230,6 +241,7 @@ Return only SQL.
             try:
 
                 status.write("Executing SQL query")
+                st.session_state.last_attempted_sql = sql
 
                 result = run_sql(sql)
 
@@ -237,6 +249,7 @@ Return only SQL.
 
                 st.session_state.result = result
                 st.session_state.sql = sql
+                st.session_state.last_error = None
 
                 st.success(f"Query succeeded on attempt {attempt}")
 
@@ -245,6 +258,7 @@ Return only SQL.
             except Exception as e:
 
                 last_error = str(e)
+                st.session_state.last_error = last_error
 
                 status.write(f"Attempt {attempt} failed")
                 status.write(last_error)
@@ -286,6 +300,9 @@ else:
 
     if run_sql_mode:
 
+        st.session_state.last_error = None
+        st.session_state.last_attempted_sql = None
+
         valid_queries = [q for q in queries if q.strip()]
 
         if not valid_queries:
@@ -305,16 +322,20 @@ else:
 
                 try:
 
+                    st.session_state.last_attempted_sql = sql
+
                     result = run_sql(sql)
 
                     st.session_state.result = result
                     st.session_state.sql = sql
+                    st.session_state.last_error = None
 
                     break
 
                 except Exception as e:
 
                     last_error = str(e)
+                    st.session_state.last_error = last_error
 
                     prompt = f"""
 Queries:
@@ -335,6 +356,13 @@ Return only SQL.
             else:
 
                 st.error("All retry attempts failed")
+
+
+if st.session_state.last_error and st.session_state.result is None:
+    with st.expander("Last execution error", expanded=True):
+        st.error(st.session_state.last_error)
+        if st.session_state.last_attempted_sql:
+            st.code(st.session_state.last_attempted_sql, language="sql")
 
 
 # ======================================================
