@@ -193,7 +193,6 @@ country_code = 'IN'
         attempt = 0
         last_error = None
         sql = None
-        generated_sql_preview = st.empty()
 
         status = st.status("Running SQL generation", expanded=True)
 
@@ -227,8 +226,6 @@ Return only SQL.
             else:
 
                 sql = generate_sql(schema_context, kpis, additional_prompt)
-
-            generated_sql_preview.code(sql, language="sql")
 
             try:
 
@@ -297,7 +294,6 @@ else:
 
         with st.spinner("Merging queries..."):
             merged_sql = merge_queries_llm(valid_queries)
-        generated_sql_preview = st.empty()
         with st.spinner("Executing Query..."):
             attempt = 0
             last_error = None
@@ -306,8 +302,6 @@ else:
             while attempt < MAX_RETRIES:
 
                 attempt += 1
-
-                generated_sql_preview.code(sql, language="sql")
 
                 try:
 
