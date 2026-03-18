@@ -3,10 +3,11 @@ from google.oauth2.service_account import Credentials
 import pandas as pd
 from datetime import datetime, timedelta
 import json
+import os
+import streamlit as st
 from utils import get_secret
 import time
 
-service_account_info = get_secret("SERVICE_ACCOUNT_JSON")
 AUTOMATION_SHEET_URL = "https://docs.google.com/spreadsheets/d/1pmHIwxTZA2fwfewUBAtW7-UE4Nq3YU1r2DEw5qaQ-XM/edit?gid=0#gid=0"
 AUTOMATION_WORKSHEET_TITLE = "Automations"
 AUTOMATION_HEADERS = [
@@ -26,14 +27,36 @@ scopes = [
 ]
 
 
+def _get_service_account_info():
+    service_account_info = get_secret("SERVICE_ACCOUNT_JSON")
+
+    if service_account_info:
+        if isinstance(service_account_info, str):
+            return json.loads(service_account_info)
+        return service_account_info
+
+    gcp_service_account = None
+
+    try:
+        if "gcp_service_account" in st.secrets:
+            gcp_service_account = dict(st.secrets["gcp_service_account"])
+    except Exception:
+        gcp_service_account = None
+
+    if gcp_service_account:
+        return gcp_service_account
+
+    env_value = os.getenv("SERVICE_ACCOUNT_JSON")
+    if env_value:
+        return json.loads(env_value)
+
+    raise ValueError(
+        "Missing Google Sheets credentials. Add SERVICE_ACCOUNT_JSON or [gcp_service_account] in Streamlit secrets."
+    )
+
+
 def get_gspread_client():
-    if not service_account_info:
-        raise ValueError("Missing SERVICE_ACCOUNT_JSON secret")
-
-    credentials_info = service_account_info
-    if isinstance(credentials_info, str):
-        credentials_info = json.loads(credentials_info)
-
+    credentials_info = _get_service_account_info()
     creds = Credentials.from_service_account_info(
         credentials_info,
         scopes=scopes
