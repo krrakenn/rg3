@@ -4,21 +4,50 @@ import pandas as pd
 import os
 import streamlit as st
 from dotenv import load_dotenv
+from requests import HTTPError
 
 load_dotenv()
 
 REDASH_URL = "https://redash.intermesh.net"
 from utils import get_secret
 
-API_KEY = get_secret("API_KEY")
 DATA_SOURCE_ID = 8
 
-headers = {
-    "Authorization": f"Key {API_KEY}",
-    "Content-Type": "application/json"
-}
+
+def _build_headers():
+    api_key = get_secret("API_KEY")
+
+    if not api_key:
+        raise ValueError("Missing API_KEY secret")
+
+    return {
+        "Authorization": f"Key {api_key}",
+        "Content-Type": "application/json"
+    }
+
+
+def _extract_api_error(response):
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+
+    if isinstance(payload, dict):
+        for key in ("message", "error", "errors"):
+            value = payload.get(key)
+            if value:
+                return str(value)
+
+        job = payload.get("job")
+        if isinstance(job, dict) and job.get("error"):
+            return str(job["error"])
+
+    response_text = response.text.strip()
+    return response_text or response.reason
 
 def run_sql(sql: str):
+    headers = _build_headers()
+
     response = requests.post(
         f"{REDASH_URL}/api/query_results",
         headers=headers,
@@ -30,7 +59,14 @@ def run_sql(sql: str):
         timeout=30
     )
 
-    response.raise_for_status()
+    try:
+        response.raise_for_status()
+    except HTTPError as exc:
+        error_message = _extract_api_error(response)
+        raise RuntimeError(
+            f"Redash query submission failed ({response.status_code}): {error_message}"
+        ) from exc
+
     data = response.json()
 
     if "job" in data:
@@ -44,7 +80,14 @@ def run_sql(sql: str):
                 timeout=10
             )
 
-            job_response.raise_for_status()
+            try:
+                job_response.raise_for_status()
+            except HTTPError as exc:
+                error_message = _extract_api_error(job_response)
+                raise RuntimeError(
+                    f"Redash job polling failed ({job_response.status_code}): {error_message}"
+                ) from exc
+
             job_data = job_response.json()
 
             status = job_data["job"]["status"]
@@ -69,7 +112,14 @@ def run_sql(sql: str):
         timeout=30
     )
 
-    final_response.raise_for_status()
+    try:
+        final_response.raise_for_status()
+    except HTTPError as exc:
+        error_message = _extract_api_error(final_response)
+        raise RuntimeError(
+            f"Redash result fetch failed ({final_response.status_code}): {error_message}"
+        ) from exc
+
     final_data = final_response.json()
 
     rows = final_data["query_result"]["data"]["rows"]
