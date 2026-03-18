@@ -7,6 +7,7 @@ import os
 import streamlit as st
 from utils import get_secret
 import time
+from urllib.parse import parse_qs, urlparse
 
 AUTOMATION_SHEET_URL = "https://docs.google.com/spreadsheets/d/1pmHIwxTZA2fwfewUBAtW7-UE4Nq3YU1r2DEw5qaQ-XM/edit?gid=0#gid=0"
 AUTOMATION_WORKSHEET_TITLE = "Automations"
@@ -85,6 +86,39 @@ def get_automation_worksheet():
         worksheet.format("A1:I1", {"textFormat": {"bold": True}})
 
     return worksheet
+
+
+def _extract_gid_from_sheet_url(sheet_url):
+    parsed_url = urlparse(sheet_url)
+
+    for raw_part in (parsed_url.query, parsed_url.fragment):
+        if not raw_part:
+            continue
+
+        params = parse_qs(raw_part)
+        gid_values = params.get("gid")
+        if gid_values:
+            gid_value = gid_values[0].strip()
+            if gid_value.isdigit():
+                return int(gid_value)
+
+    return None
+
+
+def _get_target_worksheet(spreadsheet, sheet_url):
+    gid = _extract_gid_from_sheet_url(sheet_url)
+
+    if gid is not None:
+        for worksheet in spreadsheet.worksheets():
+            if worksheet.id == gid:
+                return worksheet
+
+        raise ValueError(f"No worksheet found for gid={gid} in the provided Google Sheet URL")
+
+    try:
+        return spreadsheet.sheet1
+    except Exception:
+        return spreadsheet.add_worksheet(title="Report", rows=1000, cols=200)
 
 
 def init_db():
@@ -216,11 +250,7 @@ def write_report_to_sheet(sheet_url, result_df, refresh_frequency, query_type="n
     layout_mapping = generate_layout_mapping(result_df)
     client = get_gspread_client()
     sheet = client.open_by_url(sheet_url)
-
-    try:
-        ws = sheet.sheet1
-    except Exception:
-        ws = sheet.add_worksheet(title="Report", rows=1000, cols=200)
+    ws = _get_target_worksheet(sheet, sheet_url)
 
     column_header = generate_column_header(query_type, refresh_frequency)
 
@@ -244,10 +274,10 @@ def write_report_to_sheet(sheet_url, result_df, refresh_frequency, query_type="n
         else:
             row = len(existing_metrics) + 2
             ws.update_cell(row, 1, metric)
-            time.sleep(2)
+            time.sleep(0.1)
             existing_metrics[metric] = row
         ws.update_cell(row, date_col, value)
-        time.sleep(2)
+        time.sleep(0.1)
     
     ws.format(f"A1:A{len(existing_metrics)+1}", {"textFormat": {"bold": True}})
     
