@@ -1,281 +1,434 @@
-import gspread
-from google.oauth2.service_account import Credentials
-import pandas as pd
-from datetime import datetime, timedelta
-import json
-import os
 import streamlit as st
-from utils import get_secret
-import time
+import pandas as pd
+from sheets_automation2 import automate_report
+from sql_generator import generate_sql, merge_queries_llm
+from query_runner import run_sql
 
-AUTOMATION_SHEET_URL = "https://docs.google.com/spreadsheets/d/1pmHIwxTZA2fwfewUBAtW7-UE4Nq3YU1r2DEw5qaQ-XM/edit?gid=0#gid=0"
-AUTOMATION_WORKSHEET_TITLE = "Automations"
-AUTOMATION_HEADERS = [
-    "id",
-    "sheet_url",
-    "sql_query",
-    "refresh_frequency",
-    "layout_mapping",
-    "query_type",
-    "last_run",
-    "created_at",
-    "last_updated"
-]
-scopes = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive"
-]
+st.set_page_config(
+    page_title="Report Generator",
+    layout="wide"
+)
+
+MAX_RETRIES = 3
 
 
-def _get_service_account_info():
-    service_account_info = get_secret("SERVICE_ACCOUNT_JSON")
-
-    if service_account_info:
-        if isinstance(service_account_info, str):
-            return json.loads(service_account_info)
-        return service_account_info
-
-    gcp_service_account = None
-
-    try:
-        if "gcp_service_account" in st.secrets:
-            gcp_service_account = dict(st.secrets["gcp_service_account"])
-    except Exception:
-        gcp_service_account = None
-
-    if gcp_service_account:
-        return gcp_service_account
-
-    env_value = os.getenv("SERVICE_ACCOUNT_JSON")
-    if env_value:
-        return json.loads(env_value)
-
-    raise ValueError(
-        "Missing Google Sheets credentials. Add SERVICE_ACCOUNT_JSON or [gcp_service_account] in Streamlit secrets."
-    )
+@st.cache_data
+def load_schema():
+    df = pd.read_csv("restructured_schema.csv")
+    return df
 
 
-def get_gspread_client():
-    credentials_info = _get_service_account_info()
-    creds = Credentials.from_service_account_info(
-        credentials_info,
-        scopes=scopes
-    )
-    return gspread.authorize(creds)
+schema_df = load_schema()
+all_tables = list(schema_df.columns)
 
 
-def get_automation_worksheet():
-    if not AUTOMATION_SHEET_URL:
-        raise ValueError("Missing AUTOMATION_SHEET_URL secret")
+def build_schema_context(schema_df, selected_tables):
 
-    client = get_gspread_client()
-    spreadsheet = client.open_by_url(AUTOMATION_SHEET_URL)
+    schema_text = ""
 
-    try:
-        worksheet = spreadsheet.worksheet(AUTOMATION_WORKSHEET_TITLE)
-    except gspread.WorksheetNotFound:
-        worksheet = spreadsheet.add_worksheet(
-            title=AUTOMATION_WORKSHEET_TITLE,
-            rows=1000,
-            cols=len(AUTOMATION_HEADERS) + 2
+    for table in selected_tables:
+
+        schema_text += f"\nTable: {table}\nColumns:\n"
+
+        cols = schema_df[table].dropna().tolist()
+
+        for col in cols:
+            schema_text += f"- {col}\n"
+
+    return schema_text
+
+
+# -------------------------
+# SESSION STATE
+# -------------------------
+if "result" not in st.session_state:
+    st.session_state.result = None
+
+if "sql" not in st.session_state:
+    st.session_state.sql = None
+
+if "last_error" not in st.session_state:
+    st.session_state.last_error = None
+
+if "last_attempted_sql" not in st.session_state:
+    st.session_state.last_attempted_sql = None
+
+
+# -------------------------
+# UI STYLING
+# -------------------------
+st.markdown("""
+<style>
+.stApp {
+    background-color: #0E1117;
+}
+
+section[data-testid="stSidebar"] {
+    background-color: #161B22;
+}
+
+h1, h2, h3, h4 {
+    font-weight: 600;
+}
+
+.block-container {
+    padding-top: 2rem;
+    padding-bottom: 2rem;
+}
+</style>
+""", unsafe_allow_html=True)
+
+
+title_col, toggle_col = st.columns([10,2])
+
+with title_col:
+    st.title("Report Generator")
+    st.caption("Generate reports from tables and KPI definitions")
+
+with toggle_col:
+    st.markdown("### ")
+    mode_sql = st.toggle("I have Query")
+
+if "last_mode" not in st.session_state:
+    st.session_state.last_mode = mode_sql
+
+if st.session_state.last_mode != mode_sql:
+    st.session_state.result = None
+    st.session_state.sql = None
+    st.session_state.last_error = None
+    st.session_state.last_attempted_sql = None
+    st.session_state.last_mode = mode_sql
+
+st.divider()
+
+
+# ======================================================
+# KPI MODE
+# ======================================================
+
+if not mode_sql:
+
+    with st.sidebar:
+
+        st.header("Settings")
+
+        MAX_RETRIES = st.number_input(
+            "Maximum Retry Attempts",
+            min_value=1,
+            max_value=5,
+            value=3
         )
 
-    if worksheet.row_values(1) != AUTOMATION_HEADERS:
-        worksheet.update("A1:I1", [AUTOMATION_HEADERS])
-        worksheet.format("A1:I1", {"textFormat": {"bold": True}})
+        st.divider()
 
-    return worksheet
+        st.caption(
+            "If SQL fails, the system retries by providing error feedback to the model."
+        )
 
+    col1, col2, col3 = st.columns(3, gap="large")
 
-def init_db():
-    return get_automation_worksheet()
+    with col1:
 
+        st.markdown("### Select Tables")
 
-def store_automation(sheet_url, sql_query, refresh_frequency, layout_mapping, query_type="no_date"):
-    worksheet = get_automation_worksheet()
-    existing_values = worksheet.col_values(1)[1:]
-    existing_ids = [int(value) for value in existing_values if str(value).strip().isdigit()]
-    automation_id = max(existing_ids, default=0) + 1
-    now = datetime.now().isoformat(timespec="seconds")
+        selected_tables = st.multiselect(
+            "Choose tables",
+            options=all_tables,
+            placeholder="Search tables from im_dwh_rpt"
+        )
 
-    worksheet.append_row([
-        automation_id,
-        sheet_url,
-        sql_query,
-        refresh_frequency,
-        json.dumps(layout_mapping),
-        query_type,
-        "",
-        now,
-        now
-    ], value_input_option="USER_ENTERED")
+        if selected_tables:
 
-    return automation_id
+            with st.expander("Preview Schema"):
 
+                preview_context = build_schema_context(schema_df, selected_tables)
 
-def list_automations():
-    worksheet = get_automation_worksheet()
-    records = worksheet.get_all_records()
-    automations = []
+                st.text_area(
+                    "Schema Preview",
+                    preview_context,
+                    height=220,
+                    disabled=True
+                )
 
-    for index, record in enumerate(records, start=2):
-        record["row_number"] = index
-        automations.append(record)
+    with col2:
 
-    return automations
+        st.markdown("### KPI Definitions")
 
+        kpis = st.text_area(
+            "Define KPIs",
+            height=200,
+            placeholder="""
+Example:
+Daily revenue
+New users per day
+Top categories by sales
+"""
+        )
 
-def update_automation_last_run(row_number):
-    worksheet = get_automation_worksheet()
-    now = datetime.now().isoformat(timespec="seconds")
-    worksheet.update(f"G{row_number}:I{row_number}", [[now, worksheet.cell(row_number, 8).value, now]])
+    with col3:
 
+        st.markdown("### Conditions/Flags/Filters")
 
-def generate_layout_mapping(df):
-    mapping = {}
-    df = df.copy()
+        additional_prompt = st.text_area(
+            "Column meanings, flag values, filters",
+            height=200,
+            placeholder="""
+Example:
+is_active = 1 means active users
+status_flag 0 = inactive
+country_code = 'IN'
+""")
 
-    if df.shape[1] > 1 and pd.api.types.is_string_dtype(df.iloc[:, 0]):
-        entity_col = df.columns[0]
-        for _, row in df.iterrows():
-            entity = row[entity_col]
-            for metric in df.columns[1:]:
-                key = f"{entity} - {metric}"
-                mapping[key] = row[metric]
-        return mapping
-
-    if len(df) == 1:
-        row = df.iloc[0]
-        for metric, value in row.items():
-            mapping[metric] = value
-        return mapping
-
-    for idx, row in df.iterrows():
-        for metric, value in row.items():
-            key = f"{idx} - {metric}"
-            mapping[key] = value
-
-    return mapping
+    run = st.button("Generate Report", use_container_width=True,type="primary")
 
 
-def get_existing_metrics(ws):
-    col = ws.col_values(1)
-    metric_rows = {}
+    # ---------------------------------
+    # GENERATE SQL
+    # ---------------------------------
 
-    for i, val in enumerate(col):
-        if i == 0:
-            continue
-        metric_rows[val] = i + 1
+    if run:
 
-    return metric_rows
+        st.session_state.last_error = None
+        st.session_state.last_attempted_sql = None
 
+        if not selected_tables:
+            st.warning("Please select at least one table")
+            st.stop()
 
-def get_existing_dates(ws):
-    row = ws.row_values(1)
-    date_cols = {}
+        if not kpis:
+            st.warning("KPI definitions are required")
+            st.stop()
 
-    for i, val in enumerate(row):
-        if i == 0:
-            continue
-        date_cols[val] = i + 1
+        schema_context = build_schema_context(schema_df, selected_tables)
 
-    return date_cols
+        attempt = 0
+        last_error = None
+        sql = None
 
+        status = st.status("Running SQL generation", expanded=True)
 
-def generate_column_header(query_type, frequency):
-    today = datetime.now()
-    
-    if query_type == "no_date":
-        if frequency.lower() == "daily":
-            return today.strftime("%Y-%m-%d")
-        
-        elif frequency.lower() == "weekly":
-            week_num = today.isocalendar()[1]
-            month_name = today.strftime("%b")
-            return f"{month_name} Week {week_num}"
-        
-        elif frequency.lower() == "monthly":
-            return today.strftime("%B")
-    
-    elif query_type == "with_date":
-        if frequency.lower() == "daily":
-            return today.strftime("%Y-%m-%d")
-        
-        elif frequency.lower() == "weekly":
-            start_date = (today - timedelta(days=7)).strftime("%d")
-            end_date = today.strftime("%d")
-            month_name = today.strftime("%b")
-            return f"{month_name} {start_date}-{end_date}"
-        
-        elif frequency.lower() == "monthly":
-            return today.strftime("%B")
-    
-    return today.strftime("%Y-%m-%d")
+        while attempt < MAX_RETRIES:
 
-def write_report_to_sheet(sheet_url, result_df, refresh_frequency, query_type="no_date"):
-    layout_mapping = generate_layout_mapping(result_df)
-    client = get_gspread_client()
-    sheet = client.open_by_url(sheet_url)
+            attempt += 1
 
-    try:
-        ws = sheet.sheet1
-    except Exception:
-        ws = sheet.add_worksheet(title="Report", rows=1000, cols=200)
+            status.write(f"Attempt {attempt}: generating SQL")
 
-    column_header = generate_column_header(query_type, refresh_frequency)
+            if last_error:
 
-    if ws.cell(1, 1).value is None:
-        ws.update_cell(1, 1, "KPIs")
-        ws.format("A1", {"textFormat": {"bold": True}})
+                prompt_kpi = f"""
+KPIs:
+{kpis}
 
-    existing_dates = get_existing_dates(ws)
-    if column_header in existing_dates:
-        date_col = existing_dates[column_header]
-    else:
-        date_col = len(existing_dates) + 2
-        ws.update_cell(1, date_col, column_header)
-        ws.format(gspread.utils.rowcol_to_a1(1, date_col), {"textFormat": {"bold": True}})
+Additional Instructions:
+{additional_prompt}
 
-    existing_metrics = get_existing_metrics(ws)
+Previous SQL:
+{sql}
 
-    for metric, value in layout_mapping.items():
-        if metric in existing_metrics:
-            row = existing_metrics[metric]
+Previous SQL Error:
+{last_error}
+
+Fix the SQL.
+Return only SQL.
+"""
+
+                sql = generate_sql(schema_context, prompt_kpi, "")
+
+            else:
+
+                sql = generate_sql(schema_context, kpis, additional_prompt)
+
+            try:
+
+                status.write("Executing SQL query")
+                st.session_state.last_attempted_sql = sql
+
+                result = run_sql(sql)
+
+                status.update(label="Execution completed", state="complete")
+
+                st.session_state.result = result
+                st.session_state.sql = sql
+                st.session_state.last_error = None
+
+                st.success(f"Query succeeded on attempt {attempt}")
+
+                break
+
+            except Exception as e:
+
+                last_error = str(e)
+                st.session_state.last_error = last_error
+
+                status.write(f"Attempt {attempt} failed")
+                status.write(last_error)
+
         else:
-            row = len(existing_metrics) + 2
-            ws.update_cell(row, 1, metric)
-            time.sleep(0.1)
-            existing_metrics[metric] = row
-        ws.update_cell(row, date_col, value)
-        time.sleep(0.1)
-    
-    ws.format(f"A1:A{len(existing_metrics)+1}", {"textFormat": {"bold": True}})
-    
-    return {
-        "sheet_url": sheet_url,
-        "refresh_frequency": refresh_frequency,
-        "query_type": query_type,
-        "status": "success"
-    }
+
+            status.update(label="Execution failed", state="error")
+            st.error("All retry attempts failed")
 
 
-def automate_report(sheet_url, result_df, sql_query, refresh_frequency, query_type="no_date", register_automation=True):
-    init_db()
-    response = write_report_to_sheet(
-        sheet_url=sheet_url,
-        result_df=result_df,
-        refresh_frequency=refresh_frequency,
-        query_type=query_type
+# ======================================================
+# SQL MODE
+# ======================================================
+
+else:
+
+    st.subheader("SQL Query Mode")
+
+    query_count = st.number_input(
+        "Number of Queries",
+        min_value=1,
+        max_value=5,
+        value=1
     )
 
-    if register_automation:
-        layout_mapping = generate_layout_mapping(result_df)
-        response["automation_id"] = store_automation(
-            sheet_url,
-            sql_query,
-            refresh_frequency,
-            layout_mapping,
-            query_type
+    queries = []
+
+    for i in range(query_count):
+
+        q = st.text_area(
+            f"Query {i+1}",
+            height=160,
+            key=f"query_{i}"
         )
 
-    return response
+        queries.append(q)
+
+    run_sql_mode = st.button("Run Queries", use_container_width=True,type="primary")
+
+    if run_sql_mode:
+
+        st.session_state.last_error = None
+        st.session_state.last_attempted_sql = None
+
+        valid_queries = [q for q in queries if q.strip()]
+
+        if not valid_queries:
+            st.warning("Please enter at least one SQL query")
+            st.stop()
+
+        with st.spinner("Merging queries..."):
+            merged_sql = merge_queries_llm(valid_queries)
+        with st.spinner("Executing Query..."):
+            attempt = 0
+            last_error = None
+            sql = merged_sql
+
+            while attempt < MAX_RETRIES:
+
+                attempt += 1
+
+                try:
+
+                    st.session_state.last_attempted_sql = sql
+
+                    result = run_sql(sql)
+
+                    st.session_state.result = result
+                    st.session_state.sql = sql
+                    st.session_state.last_error = None
+
+                    break
+
+                except Exception as e:
+
+                    last_error = str(e)
+                    st.session_state.last_error = last_error
+
+                    prompt = f"""
+Queries:
+{valid_queries}
+
+Previous SQL:
+{sql}
+
+Previous SQL Error:
+{last_error}
+
+Fix the SQL.
+Return only SQL.
+"""
+
+                    sql = merge_queries_llm([prompt])
+
+            else:
+
+                st.error("All retry attempts failed")
+
+
+if st.session_state.last_error and st.session_state.result is None:
+    with st.expander("Last execution error", expanded=True):
+        st.error(st.session_state.last_error)
+        if st.session_state.last_attempted_sql:
+            st.code(st.session_state.last_attempted_sql, language="sql")
+
+
+# ======================================================
+# SHOW RESULT
+# ======================================================
+
+if st.session_state.result is not None:
+
+    tab1, tab2 = st.tabs(["Result", "Generated SQL"])
+
+    with tab1:
+        st.dataframe(st.session_state.result, use_container_width=True)
+
+    with tab2:
+        st.code(st.session_state.sql, language="sql")
+
+    st.divider()
+
+    st.markdown("#### If Everything Looks Good, Automate this Report!")
+
+    generate_report = st.checkbox("Automate Report")
+
+    if generate_report:
+
+        col_gs1, col_gs2, col_gs3 = st.columns([2, 1, 1])
+
+        with col_gs1:
+            sheet_url = st.text_input(
+                "Google Sheet URL",
+                placeholder="https://docs.google.com/spreadsheets/d/..."
+            )
+
+        with col_gs2:
+            refresh_freq = st.selectbox(
+                "Refresh Frequency",
+                ["daily", "weekly", "monthly"]
+            )
+
+        with col_gs3:
+            has_date_filter = st.selectbox(
+                "Has Date Filter?",
+                ["No", "Yes"]
+            )
+            query_type = "with_date" if has_date_filter == "Yes" else "no_date"
+
+        st.info("Grant Editor Access to the below service account:")
+        st.code("streamlit-sheets-bot@streamlit-audit-dashboard.iam.gserviceaccount.com")
+        
+        if st.button("Automate Report", use_container_width=True, type="primary"):
+            
+            if not sheet_url:
+                st.error("Please enter a Google Sheet URL")
+                st.stop()
+            
+            try:
+                with st.spinner("Setting up automation..."):
+                    result = automate_report(
+                        sheet_url=sheet_url,
+                        result_df=st.session_state.result,
+                        sql_query=st.session_state.sql,
+                        refresh_frequency=refresh_freq,
+                        query_type=query_type
+                    )
+                
+                st.success(f"✅ Report automated successfully! (ID: {result['automation_id']})")
+                st.json(result)
+                
+            except Exception as e:
+                st.error(f"❌ Failed to automate report: {str(e)}")
