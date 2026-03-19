@@ -167,10 +167,10 @@ Top categories by sales
 
     with col3:
 
-        st.markdown("### Conditions/Flags/Filters")
+        st.markdown("### Prompt Box")
 
         additional_prompt = st.text_area(
-            "Column meanings, flag values, filters",
+            "Column meanings, flag values, filters, joins and etc.",
             height=200,
             placeholder="""
 Example:
