@@ -506,6 +506,7 @@ def write_report_to_sheet(sheet_url, result_df, refresh_frequency, query_type="n
         "sheet_url": sheet_url,
         "refresh_frequency": refresh_frequency,
         "query_type": query_type,
+        "column_header": column_header,
         "status": "success"
     }
 
