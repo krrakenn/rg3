@@ -274,10 +274,10 @@ def write_report_to_sheet(sheet_url, result_df, refresh_frequency, query_type="n
         else:
             row = len(existing_metrics) + 2
             ws.update_cell(row, 1, metric)
-            time.sleep(0.1)
+            time.sleep(2)
             existing_metrics[metric] = row
         ws.update_cell(row, date_col, value)
-        time.sleep(0.1)
+        time.sleep(2)
     
     ws.format(f"A1:A{len(existing_metrics)+1}", {"textFormat": {"bold": True}})
     
