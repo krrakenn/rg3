@@ -23,8 +23,7 @@ AUTOMATION_HEADERS = [
     "created_at",
     "last_updated",
     "window_start",
-    "window_end",
-    "schedule_start_date"
+    "window_end"
 ]
 DATE_LITERAL_PATTERN = re.compile(r"(?<!\d)(\d{4})[-/](\d{2})[-/](\d{2})(?!\d)")
 scopes = [
@@ -232,14 +231,13 @@ def _get_automation_column_map(worksheet):
     }
 
 
-def store_automation(sheet_url, sql_query, refresh_frequency, layout_mapping, query_type="no_date", schedule_start_date=None):
+def store_automation(sheet_url, sql_query, refresh_frequency, layout_mapping, query_type="no_date"):
     worksheet = get_automation_worksheet()
     existing_values = worksheet.col_values(1)[1:]
     existing_ids = [int(value) for value in existing_values if str(value).strip().isdigit()]
     automation_id = max(existing_ids, default=0) + 1
     now = datetime.now().isoformat(timespec="seconds")
     window_start, window_end = infer_query_window(sql_query, query_type)
-    schedule_start = _format_iso_date(schedule_start_date)
 
     worksheet.append_row([
         automation_id,
@@ -252,8 +250,7 @@ def store_automation(sheet_url, sql_query, refresh_frequency, layout_mapping, qu
         now,
         now,
         window_start or "",
-        window_end or "",
-        schedule_start or ""
+        window_end or ""
     ], value_input_option="USER_ENTERED")
 
     return automation_id
@@ -380,7 +377,7 @@ def generate_column_header(query_type, frequency, window_start=None, window_end=
         end_value = _format_iso_date(window_end)
         if start_value == end_value:
             return start_value
-        return f"{start_value} to {end_value}"
+        return f"{start_value} - {end_value}"
 
     today = datetime.now()
     
@@ -514,9 +511,8 @@ def write_report_to_sheet(sheet_url, result_df, refresh_frequency, query_type="n
     }
 
 
-def automate_report(sheet_url, result_df, sql_query, refresh_frequency, query_type="no_date", register_automation=True, schedule_start_date=None):
+def automate_report(sheet_url, result_df, sql_query, refresh_frequency, query_type="no_date", register_automation=True):
     execution_window_start, execution_window_end = infer_query_window(sql_query, query_type)
-    normalized_schedule_start = _format_iso_date(schedule_start_date)
     init_db()
     response = write_report_to_sheet(
         sheet_url=sheet_url,
@@ -531,8 +527,6 @@ def automate_report(sheet_url, result_df, sql_query, refresh_frequency, query_ty
         response["window_start"] = execution_window_start
     if execution_window_end:
         response["window_end"] = execution_window_end
-    if normalized_schedule_start:
-        response["schedule_start_date"] = normalized_schedule_start
 
     if register_automation:
         layout_mapping = generate_layout_mapping(result_df)
@@ -541,8 +535,7 @@ def automate_report(sheet_url, result_df, sql_query, refresh_frequency, query_ty
             sql_query,
             refresh_frequency,
             layout_mapping,
-            query_type,
-            schedule_start_date=normalized_schedule_start
+            query_type
         )
 
     return response
