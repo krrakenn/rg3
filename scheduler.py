@@ -63,7 +63,7 @@ def get_due_automations():
             last_run_dt = datetime.fromisoformat(last_run)
             
             if frequency.lower() == "daily":
-                is_due = (now - last_run_dt).days <= 1
+                is_due = (now - last_run_dt).days >= 1
             elif frequency.lower() == "weekly":
                 is_due = (now - last_run_dt).days >= 7
             elif frequency.lower() == "monthly":
