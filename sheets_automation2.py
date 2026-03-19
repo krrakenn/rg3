@@ -251,6 +251,18 @@ def _normalize_sheet_value(value):
         return ""
     return value
 
+
+def _build_column_range_values(existing_column_values, total_metrics):
+    column_values = []
+
+    for row in range(2, total_metrics + 2):
+        current_value = ""
+        if len(existing_column_values) >= row:
+            current_value = existing_column_values[row - 1]
+        column_values.append([current_value])
+
+    return column_values
+
 def write_report_to_sheet(sheet_url, result_df, refresh_frequency, query_type="no_date"):
     layout_mapping = generate_layout_mapping(result_df)
     client = get_gspread_client()
@@ -259,17 +271,23 @@ def write_report_to_sheet(sheet_url, result_df, refresh_frequency, query_type="n
 
     column_header = generate_column_header(query_type, refresh_frequency)
 
+    batch_updates = []
+
     if ws.cell(1, 1).value is None:
-        ws.update("A1", [["KPIs"]])
-        ws.format("A1", {"textFormat": {"bold": True}})
+        batch_updates.append({
+            "range": "A1",
+            "values": [["KPIs"]]
+        })
 
     existing_dates = get_existing_dates(ws)
     if column_header in existing_dates:
         date_col = existing_dates[column_header]
     else:
         date_col = len(existing_dates) + 2
-        ws.update(gspread.utils.rowcol_to_a1(1, date_col), [[column_header]])
-        ws.format(gspread.utils.rowcol_to_a1(1, date_col), {"textFormat": {"bold": True}})
+        batch_updates.append({
+            "range": gspread.utils.rowcol_to_a1(1, date_col),
+            "values": [[column_header]]
+        })
 
     existing_metrics = get_existing_metrics(ws)
     new_metrics = []
@@ -284,7 +302,10 @@ def write_report_to_sheet(sheet_url, result_df, refresh_frequency, query_type="n
         start_row = existing_metrics[new_metrics[0]]
         end_row = existing_metrics[new_metrics[-1]]
         metric_values = [[metric] for metric in new_metrics]
-        ws.update(f"A{start_row}:A{end_row}", metric_values)
+        batch_updates.append({
+            "range": f"A{start_row}:A{end_row}",
+            "values": metric_values
+        })
 
     total_metrics = len(existing_metrics)
 
@@ -292,12 +313,7 @@ def write_report_to_sheet(sheet_url, result_df, refresh_frequency, query_type="n
     if total_metrics > 0:
         existing_column_values = ws.col_values(date_col)
 
-    column_values = []
-    for row in range(2, total_metrics + 2):
-        current_value = ""
-        if len(existing_column_values) >= row:
-            current_value = existing_column_values[row - 1]
-        column_values.append([current_value])
+    column_values = _build_column_range_values(existing_column_values, total_metrics)
 
     for metric, value in layout_mapping.items():
         row = existing_metrics[metric]
@@ -306,8 +322,16 @@ def write_report_to_sheet(sheet_url, result_df, refresh_frequency, query_type="n
     if column_values:
         start_cell = gspread.utils.rowcol_to_a1(2, date_col)
         end_cell = gspread.utils.rowcol_to_a1(total_metrics + 1, date_col)
-        ws.update(f"{start_cell}:{end_cell}", column_values)
-    
+        batch_updates.append({
+            "range": f"{start_cell}:{end_cell}",
+            "values": column_values
+        })
+
+    if batch_updates:
+        ws.batch_update(batch_updates, value_input_option="USER_ENTERED")
+
+    ws.format("A1", {"textFormat": {"bold": True}})
+    ws.format(gspread.utils.rowcol_to_a1(1, date_col), {"textFormat": {"bold": True}})
     ws.format(f"A1:A{len(existing_metrics)+1}", {"textFormat": {"bold": True}})
     
     return {
