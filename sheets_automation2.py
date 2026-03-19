@@ -377,7 +377,7 @@ def generate_column_header(query_type, frequency, window_start=None, window_end=
         end_value = _format_iso_date(window_end)
         if start_value == end_value:
             return start_value
-        return f"{start_value} to {end_value}"
+        return f"{start_value} - {end_value}"
 
     today = datetime.now()
     
