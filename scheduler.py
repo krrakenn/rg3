@@ -1,46 +1,43 @@
 import logging
 from datetime import datetime, timedelta
 from query_runner import run_sql
-from sheets_automation2 import automate_report, init_db, list_automations, update_automation_last_run
+from sheets_automation2 import (
+    automate_report,
+    init_db,
+    infer_query_window,
+    list_automations,
+    rewrite_query_window,
+    shift_query_window,
+    update_automation_execution_state,
+    update_automation_last_run,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def inject_date_range(sql_query, frequency):
-    from sql_generator import generate_sql
-    
-    today = datetime.now()
-    
-    if frequency.lower() == "daily":
-        start_date = (today - timedelta(days=1)).strftime("%Y-%m-%d")
-        end_date = today.strftime("%Y-%m-%d")
-        period = "last 1 day"
-    elif frequency.lower() == "weekly":
-        start_date = (today - timedelta(days=7)).strftime("%Y-%m-%d")
-        end_date = today.strftime("%Y-%m-%d")
-        period = "last 7 days"
-    else:
-        start_date = (today - timedelta(days=30)).strftime("%Y-%m-%d")
-        end_date = today.strftime("%Y-%m-%d")
-        period = "last 30 days"
-    
-    prompt = f"""Update this SQL query with correct date ranges for {period}:
+def resolve_scheduled_query(sql_query, frequency, query_type, window_start=None, window_end=None):
+    if query_type != "with_date":
+        return sql_query, None, None
 
-Original Query:
-{sql_query}
+    inferred_start, inferred_end = infer_query_window(sql_query, query_type)
+    current_window_start = inferred_start or window_start
+    current_window_end = inferred_end or window_end
 
-Use these dates:
-- Start Date: {start_date}
-- End Date: {end_date}
+    if not current_window_start or not current_window_end:
+        return sql_query, None, None
 
-Replace any hardcoded date values in WHERE clauses with these new dates.
-Keep everything else exactly the same.
+    next_window_start, next_window_end = shift_query_window(
+        current_window_start,
+        current_window_end,
+        frequency
+    )
 
-Return ONLY the updated SQL query, no explanation:"""
-    
-    updated_query = generate_sql("", prompt, "")
-    return updated_query.strip()
+    if not next_window_start or not next_window_end:
+        return sql_query, None, None
+
+    updated_query = rewrite_query_window(sql_query, next_window_start, next_window_end)
+    return updated_query, next_window_start, next_window_end
 
 
 def get_due_automations():
@@ -78,7 +75,9 @@ def get_due_automations():
                 "sheet_url": sheet_url,
                 "sql_query": sql_query,
                 "frequency": frequency,
-                "query_type": query_type
+                "query_type": query_type,
+                "window_start": auto.get("window_start") or None,
+                "window_end": auto.get("window_end") or None
             })
     
     return due_automations
@@ -91,14 +90,22 @@ def run_automation(automation):
     sql_query = automation["sql_query"]
     frequency = automation["frequency"]
     query_type = automation["query_type"]
+    window_start = automation.get("window_start")
+    window_end = automation.get("window_end")
     
     try:
         logger.info(f"Running automation {auto_id}")
         
-        final_query = sql_query
-        if query_type == "with_date":
-            final_query = inject_date_range(sql_query, frequency)
-            logger.info(f"Date range injected for {frequency}")
+        final_query, next_window_start, next_window_end = resolve_scheduled_query(
+            sql_query,
+            frequency,
+            query_type,
+            window_start=window_start,
+            window_end=window_end
+        )
+
+        if next_window_start and next_window_end:
+            logger.info(f"Using shifted date window {next_window_start} to {next_window_end}")
         
         logger.info(f"Executing query...")
         result_df = run_sql(final_query)
@@ -113,7 +120,16 @@ def run_automation(automation):
             register_automation=False
         )
 
-        update_automation_last_run(row_number)
+        if next_window_start and next_window_end:
+            update_automation_execution_state(
+                row_number,
+                sql_query=final_query,
+                window_start=next_window_start,
+                window_end=next_window_end,
+                last_run=datetime.now().isoformat(timespec="seconds")
+            )
+        else:
+            update_automation_last_run(row_number)
         
         logger.info(f"Automation {auto_id} completed successfully")
         return {"status": "success", "auto_id": auto_id}
