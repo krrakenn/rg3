@@ -2,8 +2,10 @@ import gspread
 from google.oauth2.service_account import Credentials
 import pandas as pd
 from datetime import datetime, timedelta
+from calendar import monthrange
 import json
 import os
+import re
 import streamlit as st
 from utils import get_secret
 from urllib.parse import parse_qs, urlparse
@@ -19,8 +21,11 @@ AUTOMATION_HEADERS = [
     "query_type",
     "last_run",
     "created_at",
-    "last_updated"
+    "last_updated",
+    "window_start",
+    "window_end"
 ]
+DATE_LITERAL_PATTERN = re.compile(r"(?<!\d)(\d{4})[-/](\d{2})[-/](\d{2})(?!\d)")
 scopes = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive"
@@ -81,8 +86,9 @@ def get_automation_worksheet():
         )
 
     if worksheet.row_values(1) != AUTOMATION_HEADERS:
-        worksheet.update("A1:I1", [AUTOMATION_HEADERS])
-        worksheet.format("A1:I1", {"textFormat": {"bold": True}})
+        header_end_cell = gspread.utils.rowcol_to_a1(1, len(AUTOMATION_HEADERS))
+        worksheet.update(f"A1:{header_end_cell}", [AUTOMATION_HEADERS])
+        worksheet.format(f"A1:{header_end_cell}", {"textFormat": {"bold": True}})
 
     return worksheet
 
@@ -124,12 +130,114 @@ def init_db():
     return get_automation_worksheet()
 
 
+def _parse_iso_date(value):
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    return datetime.fromisoformat(str(value)).date()
+
+
+def _format_iso_date(value):
+    parsed_date = _parse_iso_date(value)
+    return parsed_date.isoformat() if parsed_date else None
+
+
+def infer_query_window(sql_query, query_type="no_date"):
+    if query_type != "with_date" or not sql_query:
+        return None, None
+
+    found_dates = []
+    seen_dates = set()
+
+    for match in DATE_LITERAL_PATTERN.finditer(sql_query):
+        normalized = f"{match.group(1)}-{match.group(2)}-{match.group(3)}"
+        if normalized not in seen_dates:
+            found_dates.append(normalized)
+            seen_dates.add(normalized)
+
+    if len(found_dates) >= 2:
+        return found_dates[0], found_dates[1]
+
+    if len(found_dates) == 1:
+        return found_dates[0], found_dates[0]
+
+    return None, None
+
+
+def _add_months(value, months):
+    month_index = value.month - 1 + months
+    year = value.year + month_index // 12
+    month = month_index % 12 + 1
+    day = min(value.day, monthrange(year, month)[1])
+    return value.replace(year=year, month=month, day=day)
+
+
+def shift_query_window(window_start, window_end, frequency):
+    start_date = _parse_iso_date(window_start)
+    end_date = _parse_iso_date(window_end)
+
+    if not start_date or not end_date:
+        return None, None
+
+    frequency_key = (frequency or "").lower()
+
+    if frequency_key == "daily":
+        delta = timedelta(days=1)
+        next_start = start_date + delta
+        next_end = end_date + delta
+    elif frequency_key == "weekly":
+        delta = timedelta(days=7)
+        next_start = start_date + delta
+        next_end = end_date + delta
+    elif frequency_key == "monthly":
+        next_start = _add_months(start_date, 1)
+        next_end = _add_months(end_date, 1)
+    else:
+        return None, None
+
+    return next_start.isoformat(), next_end.isoformat()
+
+
+def rewrite_query_window(sql_query, new_start, new_end):
+    if not sql_query:
+        return sql_query
+
+    replacements = [new_start, new_end]
+    replacement_index = 0
+    seen_dates = set()
+
+    def replace_match(match):
+        nonlocal replacement_index
+        normalized = f"{match.group(1)}-{match.group(2)}-{match.group(3)}"
+
+        if normalized in seen_dates or replacement_index >= len(replacements):
+            return match.group(0)
+
+        seen_dates.add(normalized)
+        replacement_value = replacements[replacement_index]
+        replacement_index += 1
+        separator = "-" if "-" in match.group(0) else "/"
+        return replacement_value.replace("-", separator)
+
+    return DATE_LITERAL_PATTERN.sub(replace_match, sql_query)
+
+
+def _get_automation_column_map(worksheet):
+    return {
+        header: index
+        for index, header in enumerate(worksheet.row_values(1), start=1)
+        if header
+    }
+
+
 def store_automation(sheet_url, sql_query, refresh_frequency, layout_mapping, query_type="no_date"):
     worksheet = get_automation_worksheet()
     existing_values = worksheet.col_values(1)[1:]
     existing_ids = [int(value) for value in existing_values if str(value).strip().isdigit()]
     automation_id = max(existing_ids, default=0) + 1
     now = datetime.now().isoformat(timespec="seconds")
+    window_start, window_end = infer_query_window(sql_query, query_type)
 
     worksheet.append_row([
         automation_id,
@@ -140,7 +248,9 @@ def store_automation(sheet_url, sql_query, refresh_frequency, layout_mapping, qu
         query_type,
         "",
         now,
-        now
+        now,
+        window_start or "",
+        window_end or ""
     ], value_input_option="USER_ENTERED")
 
     return automation_id
@@ -161,7 +271,53 @@ def list_automations():
 def update_automation_last_run(row_number):
     worksheet = get_automation_worksheet()
     now = datetime.now().isoformat(timespec="seconds")
-    worksheet.update(f"G{row_number}:I{row_number}", [[now, worksheet.cell(row_number, 8).value, now]])
+    column_map = _get_automation_column_map(worksheet)
+    last_run_col = column_map["last_run"]
+    last_updated_col = column_map["last_updated"]
+    last_run_cell = gspread.utils.rowcol_to_a1(row_number, last_run_col)
+    last_updated_cell = gspread.utils.rowcol_to_a1(row_number, last_updated_col)
+    worksheet.batch_update([
+        {"range": last_run_cell, "values": [[now]]},
+        {"range": last_updated_cell, "values": [[now]]}
+    ], value_input_option="USER_ENTERED")
+
+
+def update_automation_execution_state(row_number, sql_query=None, window_start=None, window_end=None, last_run=None):
+    worksheet = get_automation_worksheet()
+    column_map = _get_automation_column_map(worksheet)
+    now = datetime.now().isoformat(timespec="seconds")
+    batch_updates = []
+
+    if sql_query is not None:
+        batch_updates.append({
+            "range": gspread.utils.rowcol_to_a1(row_number, column_map["sql_query"]),
+            "values": [[sql_query]]
+        })
+
+    if "window_start" in column_map and window_start is not None:
+        batch_updates.append({
+            "range": gspread.utils.rowcol_to_a1(row_number, column_map["window_start"]),
+            "values": [[window_start]]
+        })
+
+    if "window_end" in column_map and window_end is not None:
+        batch_updates.append({
+            "range": gspread.utils.rowcol_to_a1(row_number, column_map["window_end"]),
+            "values": [[window_end]]
+        })
+
+    if last_run is not None:
+        batch_updates.append({
+            "range": gspread.utils.rowcol_to_a1(row_number, column_map["last_run"]),
+            "values": [[last_run]]
+        })
+
+    batch_updates.append({
+        "range": gspread.utils.rowcol_to_a1(row_number, column_map["last_updated"]),
+        "values": [[now]]
+    })
+
+    worksheet.batch_update(batch_updates, value_input_option="USER_ENTERED")
 
 
 def generate_layout_mapping(df):
@@ -215,7 +371,14 @@ def get_existing_dates(ws):
     return date_cols
 
 
-def generate_column_header(query_type, frequency):
+def generate_column_header(query_type, frequency, window_start=None, window_end=None):
+    if query_type == "with_date" and window_start and window_end:
+        start_value = _format_iso_date(window_start)
+        end_value = _format_iso_date(window_end)
+        if start_value == end_value:
+            return start_value
+        return f"{start_value} to {end_value}"
+
     today = datetime.now()
     
     if query_type == "no_date":
@@ -263,13 +426,18 @@ def _build_column_range_values(existing_column_values, total_metrics):
 
     return column_values
 
-def write_report_to_sheet(sheet_url, result_df, refresh_frequency, query_type="no_date"):
+def write_report_to_sheet(sheet_url, result_df, refresh_frequency, query_type="no_date", execution_window_start=None, execution_window_end=None):
     layout_mapping = generate_layout_mapping(result_df)
     client = get_gspread_client()
     sheet = client.open_by_url(sheet_url)
     ws = _get_target_worksheet(sheet, sheet_url)
 
-    column_header = generate_column_header(query_type, refresh_frequency)
+    column_header = generate_column_header(
+        query_type,
+        refresh_frequency,
+        window_start=execution_window_start,
+        window_end=execution_window_end
+    )
 
     batch_updates = []
 
@@ -343,13 +511,21 @@ def write_report_to_sheet(sheet_url, result_df, refresh_frequency, query_type="n
 
 
 def automate_report(sheet_url, result_df, sql_query, refresh_frequency, query_type="no_date", register_automation=True):
+    execution_window_start, execution_window_end = infer_query_window(sql_query, query_type)
     init_db()
     response = write_report_to_sheet(
         sheet_url=sheet_url,
         result_df=result_df,
         refresh_frequency=refresh_frequency,
-        query_type=query_type
+        query_type=query_type,
+        execution_window_start=execution_window_start,
+        execution_window_end=execution_window_end
     )
+
+    if execution_window_start:
+        response["window_start"] = execution_window_start
+    if execution_window_end:
+        response["window_end"] = execution_window_end
 
     if register_automation:
         layout_mapping = generate_layout_mapping(result_df)
