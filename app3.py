@@ -172,12 +172,7 @@ Top categories by sales
         additional_prompt = st.text_area(
             "Column meanings, flag values, filters, joins and etc.",
             height=200,
-            placeholder="""
-Example:
-is_active = 1 means active users
-status_flag 0 = inactive
-country_code = 'IN'
-""")
+            placeholder="""""")
 
     run = st.button("Generate Report", use_container_width=True,type="primary")
 
