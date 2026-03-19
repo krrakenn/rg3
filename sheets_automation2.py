@@ -6,7 +6,6 @@ import json
 import os
 import streamlit as st
 from utils import get_secret
-import time
 from urllib.parse import parse_qs, urlparse
 
 AUTOMATION_SHEET_URL = "https://docs.google.com/spreadsheets/d/1pmHIwxTZA2fwfewUBAtW7-UE4Nq3YU1r2DEw5qaQ-XM/edit?gid=0#gid=0"
@@ -246,6 +245,12 @@ def generate_column_header(query_type, frequency):
     
     return today.strftime("%Y-%m-%d")
 
+
+def _normalize_sheet_value(value):
+    if pd.isna(value):
+        return ""
+    return value
+
 def write_report_to_sheet(sheet_url, result_df, refresh_frequency, query_type="no_date"):
     layout_mapping = generate_layout_mapping(result_df)
     client = get_gspread_client()
@@ -255,7 +260,7 @@ def write_report_to_sheet(sheet_url, result_df, refresh_frequency, query_type="n
     column_header = generate_column_header(query_type, refresh_frequency)
 
     if ws.cell(1, 1).value is None:
-        ws.update_cell(1, 1, "KPIs")
+        ws.update("A1", [["KPIs"]])
         ws.format("A1", {"textFormat": {"bold": True}})
 
     existing_dates = get_existing_dates(ws)
@@ -263,21 +268,45 @@ def write_report_to_sheet(sheet_url, result_df, refresh_frequency, query_type="n
         date_col = existing_dates[column_header]
     else:
         date_col = len(existing_dates) + 2
-        ws.update_cell(1, date_col, column_header)
+        ws.update(gspread.utils.rowcol_to_a1(1, date_col), [[column_header]])
         ws.format(gspread.utils.rowcol_to_a1(1, date_col), {"textFormat": {"bold": True}})
 
     existing_metrics = get_existing_metrics(ws)
+    new_metrics = []
+
+    for metric in layout_mapping:
+        if metric not in existing_metrics:
+            row = len(existing_metrics) + 2
+            existing_metrics[metric] = row
+            new_metrics.append(metric)
+
+    if new_metrics:
+        start_row = existing_metrics[new_metrics[0]]
+        end_row = existing_metrics[new_metrics[-1]]
+        metric_values = [[metric] for metric in new_metrics]
+        ws.update(f"A{start_row}:A{end_row}", metric_values)
+
+    total_metrics = len(existing_metrics)
+
+    existing_column_values = []
+    if total_metrics > 0:
+        existing_column_values = ws.col_values(date_col)
+
+    column_values = []
+    for row in range(2, total_metrics + 2):
+        current_value = ""
+        if len(existing_column_values) >= row:
+            current_value = existing_column_values[row - 1]
+        column_values.append([current_value])
 
     for metric, value in layout_mapping.items():
-        if metric in existing_metrics:
-            row = existing_metrics[metric]
-        else:
-            row = len(existing_metrics) + 2
-            ws.update_cell(row, 1, metric)
-            time.sleep(2)
-            existing_metrics[metric] = row
-        ws.update_cell(row, date_col, value)
-        time.sleep(2)
+        row = existing_metrics[metric]
+        column_values[row - 2] = [_normalize_sheet_value(value)]
+
+    if column_values:
+        start_cell = gspread.utils.rowcol_to_a1(2, date_col)
+        end_cell = gspread.utils.rowcol_to_a1(total_metrics + 1, date_col)
+        ws.update(f"{start_cell}:{end_cell}", column_values)
     
     ws.format(f"A1:A{len(existing_metrics)+1}", {"textFormat": {"bold": True}})
     
