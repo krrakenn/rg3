@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+from datetime import date
 from sheets_automation2 import automate_report
 from sql_generator import generate_sql, merge_queries_llm
 from query_runner import run_sql
@@ -403,6 +404,12 @@ if st.session_state.result is not None:
             )
             query_type = "with_date" if has_date_filter == "Yes" else "no_date"
 
+        schedule_start_date = st.date_input(
+            "Schedule Start Date",
+            value=date.today(),
+            help="The scheduler will start recurring runs from this date. Example: choose a Monday for weekly Monday runs."
+        )
+
         st.info("Grant Editor Access to the below service account:")
         st.code("streamlit-sheets-bot@streamlit-audit-dashboard.iam.gserviceaccount.com")
         
@@ -419,7 +426,8 @@ if st.session_state.result is not None:
                         result_df=st.session_state.result,
                         sql_query=st.session_state.sql,
                         refresh_frequency=refresh_freq,
-                        query_type=query_type
+                        query_type=query_type,
+                        schedule_start_date=schedule_start_date
                     )
                 
                 st.success(f"✅ Report automated successfully! (ID: {result['automation_id']})")
