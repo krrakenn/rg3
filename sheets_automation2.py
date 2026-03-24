@@ -10,7 +10,7 @@ import streamlit as st
 from zoneinfo import ZoneInfo
 from utils import get_secret
 from urllib.parse import parse_qs, urlparse
-from sql_generator import analyze_sql_date_window_llm, generate_column_header_llm, rewrite_sql_date_window_llm
+from sql_generator import analyze_sheet_header_window_llm, analyze_sql_date_window_llm, generate_column_header_llm, rewrite_sql_date_window_llm
 
 AUTOMATION_SHEET_URL = "https://docs.google.com/spreadsheets/d/1pmHIwxTZA2fwfewUBAtW7-UE4Nq3YU1r2DEw5qaQ-XM/edit?gid=0#gid=0"
 AUTOMATION_WORKSHEET_TITLE = "Automations"
@@ -494,6 +494,39 @@ def get_existing_dates(ws):
         date_cols[val] = i + 1
 
     return date_cols
+
+
+def get_latest_report_column_header(sheet_url):
+    client = get_gspread_client()
+    spreadsheet = client.open_by_url(sheet_url)
+    worksheet = _get_target_worksheet(spreadsheet, sheet_url)
+    header_row = worksheet.row_values(1)
+
+    if len(header_row) <= 1:
+        return None
+
+    for value in reversed(header_row[1:]):
+        if str(value).strip():
+            return str(value).strip()
+
+    return None
+
+
+def infer_query_window_from_sheet_header(sheet_url, frequency):
+    header_text = get_latest_report_column_header(sheet_url)
+    if not header_text:
+        return None, None, None
+
+    try:
+        analysis = analyze_sheet_header_window_llm(header_text, frequency=frequency)
+        window_start = analysis.get("window_start")
+        window_end = analysis.get("window_end")
+        if window_start and window_end:
+            return window_start, window_end, header_text
+    except Exception:
+        pass
+
+    return None, None, header_text
 
 
 def generate_column_header(query_type, frequency, window_start=None, window_end=None, sql_query=None):
