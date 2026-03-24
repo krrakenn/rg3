@@ -7,11 +7,14 @@ import json
 import os
 import re
 import streamlit as st
+from zoneinfo import ZoneInfo
 from utils import get_secret
 from urllib.parse import parse_qs, urlparse
+from sql_generator import rewrite_sql_date_window_llm
 
 AUTOMATION_SHEET_URL = "https://docs.google.com/spreadsheets/d/1pmHIwxTZA2fwfewUBAtW7-UE4Nq3YU1r2DEw5qaQ-XM/edit?gid=0#gid=0"
 AUTOMATION_WORKSHEET_TITLE = "Automations"
+IST = ZoneInfo("Asia/Kolkata")
 AUTOMATION_HEADERS = [
     "id",
     "sheet_url",
@@ -30,6 +33,15 @@ scopes = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive"
 ]
+
+
+def get_current_ist_datetime():
+    return datetime.now(IST)
+
+
+def format_sheet_timestamp(value=None):
+    timestamp = value or get_current_ist_datetime()
+    return timestamp.isoformat(timespec="seconds")
 
 
 def _get_service_account_info():
@@ -223,6 +235,25 @@ def rewrite_query_window(sql_query, new_start, new_end):
     return DATE_LITERAL_PATTERN.sub(replace_match, sql_query)
 
 
+def rewrite_query_window_with_llm(sql_query, current_start, current_end, new_start, new_end):
+    if not sql_query:
+        return sql_query
+
+    if current_start and current_end:
+        try:
+            return rewrite_sql_date_window_llm(
+                sql_query,
+                current_start,
+                current_end,
+                new_start,
+                new_end
+            )
+        except Exception:
+            pass
+
+    return rewrite_query_window(sql_query, new_start, new_end)
+
+
 def _get_automation_column_map(worksheet):
     return {
         header: index
@@ -236,7 +267,7 @@ def store_automation(sheet_url, sql_query, refresh_frequency, layout_mapping, qu
     existing_values = worksheet.col_values(1)[1:]
     existing_ids = [int(value) for value in existing_values if str(value).strip().isdigit()]
     automation_id = max(existing_ids, default=0) + 1
-    now = datetime.now().isoformat(timespec="seconds")
+    now = format_sheet_timestamp()
     window_start, window_end = infer_query_window(sql_query, query_type)
 
     worksheet.append_row([
@@ -246,12 +277,12 @@ def store_automation(sheet_url, sql_query, refresh_frequency, layout_mapping, qu
         refresh_frequency,
         json.dumps(layout_mapping),
         query_type,
-        "",
+        now,
         now,
         now,
         window_start or "",
         window_end or ""
-    ], value_input_option="USER_ENTERED")
+    ], value_input_option="RAW")
 
     return automation_id
 
@@ -270,7 +301,7 @@ def list_automations():
 
 def update_automation_last_run(row_number):
     worksheet = get_automation_worksheet()
-    now = datetime.now().isoformat(timespec="seconds")
+    now = format_sheet_timestamp()
     column_map = _get_automation_column_map(worksheet)
     last_run_col = column_map["last_run"]
     last_updated_col = column_map["last_updated"]
@@ -279,13 +310,13 @@ def update_automation_last_run(row_number):
     worksheet.batch_update([
         {"range": last_run_cell, "values": [[now]]},
         {"range": last_updated_cell, "values": [[now]]}
-    ], value_input_option="USER_ENTERED")
+    ], value_input_option="RAW")
 
 
 def update_automation_execution_state(row_number, sql_query=None, window_start=None, window_end=None, last_run=None):
     worksheet = get_automation_worksheet()
     column_map = _get_automation_column_map(worksheet)
-    now = datetime.now().isoformat(timespec="seconds")
+    now = format_sheet_timestamp()
     batch_updates = []
 
     if sql_query is not None:
@@ -317,7 +348,7 @@ def update_automation_execution_state(row_number, sql_query=None, window_start=N
         "values": [[now]]
     })
 
-    worksheet.batch_update(batch_updates, value_input_option="USER_ENTERED")
+    worksheet.batch_update(batch_updates, value_input_option="RAW")
 
 
 def generate_layout_mapping(df):
@@ -379,7 +410,7 @@ def generate_column_header(query_type, frequency, window_start=None, window_end=
             return start_value
         return f"{start_value} - {end_value}"
 
-    today = datetime.now()
+    today = get_current_ist_datetime()
     
     if query_type == "no_date":
         if frequency.lower() == "daily":
