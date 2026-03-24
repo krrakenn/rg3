@@ -1,13 +1,23 @@
 import os
 import json
-from openai import OpenAI
 from dotenv import load_dotenv
 import streamlit as st
 from utils import get_secret
 load_dotenv()
 
+try:
+    from openai import OpenAI
+except ImportError:
+    OpenAI = None
+
 
 def _get_llm_client():
+    if OpenAI is None:
+        raise ImportError(
+            "The openai package is not installed in the current environment. "
+            "Install dependencies from requirements.txt before using LLM features."
+        )
+
     return OpenAI(
         api_key=get_secret("LLM_API_KEY") or os.getenv("LLM_API_KEY"),
         base_url="https://imllm.intermesh.net/v1"
