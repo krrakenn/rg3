@@ -3,11 +3,14 @@ from calendar import monthrange
 from datetime import datetime, timedelta
 from query_runner import run_sql
 from sheets_automation2 import (
+    IST,
     automate_report,
+    format_sheet_timestamp,
+    get_current_ist_datetime,
     init_db,
     infer_query_window,
     list_automations,
-    rewrite_query_window,
+    rewrite_query_window_with_llm,
     shift_query_window,
     update_automation_execution_state,
     update_automation_last_run,
@@ -17,17 +20,38 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+def _ensure_ist_datetime(value):
+    if value.tzinfo is None:
+        return value.replace(tzinfo=IST)
+    return value.astimezone(IST)
+
+
 def parse_datetime_safe(value):
     if not value:
         return None
+    if isinstance(value, datetime):
+        return _ensure_ist_datetime(value)
+    normalized = str(value).strip()
     try:
-        return datetime.fromisoformat(value)
+        return _ensure_ist_datetime(datetime.fromisoformat(normalized))
     except ValueError:
-        try:
-            return datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
-        except Exception:
-            logger.error(f"Invalid datetime format: {value}")
-            return None
+        formats = [
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d",
+            "%d/%m/%Y %H:%M:%S",
+            "%m/%d/%Y %H:%M:%S",
+            "%d/%m/%Y",
+            "%m/%d/%Y",
+        ]
+
+        for fmt in formats:
+            try:
+                return _ensure_ist_datetime(datetime.strptime(normalized, fmt))
+            except ValueError:
+                continue
+
+        logger.error(f"Invalid datetime format: {value}")
+        return None
 
 
 def _add_months(value, months):
@@ -39,11 +63,8 @@ def _add_months(value, months):
 
 
 def _parse_schedule_date(value):
-    if not value:
-        return None
-    if isinstance(value, datetime):
-        return value.date()
-    return datetime.fromisoformat(str(value)).date()
+    parsed_datetime = parse_datetime_safe(value)
+    return parsed_datetime.date() if parsed_datetime else None
 
 
 def _get_latest_scheduled_date(schedule_start_date, frequency, current_date):
@@ -72,54 +93,38 @@ def _get_latest_scheduled_date(schedule_start_date, frequency, current_date):
     return None
 
 
+def _next_due_datetime(last_run_dt, frequency):
+    frequency_key = (frequency or "").lower()
+
+    if frequency_key == "daily":
+        return last_run_dt + timedelta(days=1)
+
+    if frequency_key == "weekly":
+        return last_run_dt + timedelta(days=7)
+
+    if frequency_key == "monthly":
+        return _add_months(last_run_dt, 1)
+
+    return None
+
+
 def _is_automation_due(now, frequency, last_run=None, schedule_start_date=None):
     start_date = _parse_schedule_date(schedule_start_date)
-    current_date = now.date()
-
     last_run_dt = parse_datetime_safe(last_run) if last_run else None
 
-    if start_date:
-        latest_scheduled_date = _get_latest_scheduled_date(start_date, frequency, current_date)
-        if latest_scheduled_date is None:
-            return False
-        if not last_run_dt:
-            return True
-
-        freq = frequency.lower()
-
-        if freq == "daily":
-            return (
-                last_run_dt.date() < latest_scheduled_date
-                and (now - last_run_dt) >= timedelta(days=1)
-            )
-        
-        if freq == "weekly":
-            return (
-                last_run_dt.date() < latest_scheduled_date
-                and (now - last_run_dt) >= timedelta(days=7)
-            )
-        
-        if freq == "monthly":
-            return (
-                last_run_dt.date() < latest_scheduled_date
-                and (now - last_run_dt) >= timedelta(days=28)
-            )
-        
-        return last_run_dt.date() < latest_scheduled_date
-
     if not last_run_dt:
+        if start_date and now.date() < start_date:
+            return False
         return True
 
-    if frequency.lower() == "daily":
-        return (now - last_run_dt) >= timedelta(days=1)
+    next_due_at = _next_due_datetime(last_run_dt, frequency)
+    if not next_due_at:
+        return False
 
-    if frequency.lower() == "weekly":
-        return (now - last_run_dt) >= timedelta(days=7)
+    if start_date and last_run_dt.date() < start_date and now.date() < start_date:
+        return False
 
-    if frequency.lower() == "monthly":
-        return (now - last_run_dt) >= timedelta(days=30)
-
-    return False
+    return now >= next_due_at
 
 
 def resolve_scheduled_query(sql_query, frequency, query_type, window_start=None, window_end=None):
@@ -142,12 +147,18 @@ def resolve_scheduled_query(sql_query, frequency, query_type, window_start=None,
     if not next_window_start or not next_window_end:
         return sql_query, None, None
 
-    updated_query = rewrite_query_window(sql_query, next_window_start, next_window_end)
+    updated_query = rewrite_query_window_with_llm(
+        sql_query,
+        current_window_start,
+        current_window_end,
+        next_window_start,
+        next_window_end
+    )
     return updated_query, next_window_start, next_window_end
 
 
 def get_due_automations():
-    now = datetime.now()
+    now = get_current_ist_datetime()
     due_automations = []
 
     automations = list_automations()
@@ -231,7 +242,7 @@ def run_automation(automation):
                 sql_query=final_query,
                 window_start=next_window_start,
                 window_end=next_window_end,
-                last_run=datetime.now().isoformat(timespec="seconds")
+                last_run=format_sheet_timestamp()
             )
         else:
             update_automation_last_run(row_number)
