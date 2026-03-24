@@ -74,6 +74,11 @@ def append_kpi_chat_message(role, content):
         })
 
 
+def clear_kpi_draft():
+    st.session_state.kpi_sql_draft = ""
+    reset_execution_state()
+
+
 # -------------------------
 initialize_session_state()
 
@@ -226,12 +231,11 @@ if not mode_sql:
             run_kpi_query = st.button("Run Query", use_container_width=True, type="primary")
 
         with action_col2:
-            clear_draft = st.button("Clear Draft", use_container_width=True)
-
-        if clear_draft:
-            st.session_state.kpi_sql_draft = ""
-            reset_execution_state()
-            st.rerun()
+            st.button(
+                "Clear Draft",
+                use_container_width=True,
+                on_click=clear_kpi_draft
+            )
 
         if run_kpi_query:
             draft_sql = st.session_state.kpi_sql_draft.strip()
