@@ -29,6 +29,7 @@ AUTOMATION_HEADERS = [
     "window_end"
 ]
 DATE_LITERAL_PATTERN = re.compile(r"(?<!\d)(\d{4})[-/](\d{2})[-/](\d{2})(?!\d)")
+EXCLUSIVE_END_PATTERN_TEMPLATE = r"<\s*(?:timestamp\s*)?['\"]?{window_end}(?:\s+00:00:00)?['\"]?"
 scopes = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive"
@@ -153,6 +154,31 @@ def _parse_iso_date(value):
 def _format_iso_date(value):
     parsed_date = _parse_iso_date(value)
     return parsed_date.isoformat() if parsed_date else None
+
+
+def _is_exclusive_window_end(sql_query, window_end):
+    if not sql_query or not window_end:
+        return False
+
+    normalized_end = _format_iso_date(window_end)
+    if not normalized_end:
+        return False
+
+    pattern = EXCLUSIVE_END_PATTERN_TEMPLATE.format(window_end=re.escape(normalized_end))
+    return re.search(pattern, sql_query, flags=re.IGNORECASE) is not None
+
+
+def _get_display_window_end(sql_query, window_start, window_end):
+    start_date = _parse_iso_date(window_start)
+    end_date = _parse_iso_date(window_end)
+
+    if not start_date or not end_date:
+        return _format_iso_date(window_end)
+
+    if end_date > start_date and _is_exclusive_window_end(sql_query, window_end):
+        return (end_date - timedelta(days=1)).isoformat()
+
+    return end_date.isoformat()
 
 
 def infer_query_window(sql_query, query_type="no_date"):
@@ -402,10 +428,10 @@ def get_existing_dates(ws):
     return date_cols
 
 
-def generate_column_header(query_type, frequency, window_start=None, window_end=None):
+def generate_column_header(query_type, frequency, window_start=None, window_end=None, sql_query=None):
     if query_type == "with_date" and window_start and window_end:
         start_value = _format_iso_date(window_start)
-        end_value = _format_iso_date(window_end)
+        end_value = _get_display_window_end(sql_query, window_start, window_end)
         if start_value == end_value:
             return start_value
         return f"{start_value} - {end_value}"
@@ -457,7 +483,7 @@ def _build_column_range_values(existing_column_values, total_metrics):
 
     return column_values
 
-def write_report_to_sheet(sheet_url, result_df, refresh_frequency, query_type="no_date", execution_window_start=None, execution_window_end=None):
+def write_report_to_sheet(sheet_url, result_df, refresh_frequency, query_type="no_date", execution_window_start=None, execution_window_end=None, sql_query=None):
     layout_mapping = generate_layout_mapping(result_df)
     client = get_gspread_client()
     sheet = client.open_by_url(sheet_url)
@@ -467,7 +493,8 @@ def write_report_to_sheet(sheet_url, result_df, refresh_frequency, query_type="n
         query_type,
         refresh_frequency,
         window_start=execution_window_start,
-        window_end=execution_window_end
+        window_end=execution_window_end,
+        sql_query=sql_query
     )
 
     batch_updates = []
@@ -551,7 +578,8 @@ def automate_report(sheet_url, result_df, sql_query, refresh_frequency, query_ty
         refresh_frequency=refresh_frequency,
         query_type=query_type,
         execution_window_start=execution_window_start,
-        execution_window_end=execution_window_end
+        execution_window_end=execution_window_end,
+        sql_query=sql_query
     )
 
     if execution_window_start:
