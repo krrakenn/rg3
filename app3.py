@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 from sheets_automation2 import automate_report
-from sql_generator import generate_sql, merge_queries_llm
+from sql_generator import generate_sql_chat_response, merge_queries_llm
 from query_runner import run_sql
 
 st.set_page_config(
@@ -38,20 +38,44 @@ def build_schema_context(schema_df, selected_tables):
     return schema_text
 
 
-# -------------------------
-# SESSION STATE
-# -------------------------
-if "result" not in st.session_state:
+def initialize_session_state():
+    defaults = {
+        "result": None,
+        "sql": None,
+        "last_error": None,
+        "last_attempted_sql": None,
+        "kpi_chat_messages": [],
+        "kpi_sql_draft": "",
+    }
+
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+
+def reset_execution_state():
     st.session_state.result = None
-
-if "sql" not in st.session_state:
     st.session_state.sql = None
-
-if "last_error" not in st.session_state:
     st.session_state.last_error = None
-
-if "last_attempted_sql" not in st.session_state:
     st.session_state.last_attempted_sql = None
+
+
+def reset_kpi_chat_state():
+    reset_execution_state()
+    st.session_state.kpi_chat_messages = []
+    st.session_state.kpi_sql_draft = ""
+
+
+def append_kpi_chat_message(role, content):
+    if content and str(content).strip():
+        st.session_state.kpi_chat_messages.append({
+            "role": role,
+            "content": str(content).strip()
+        })
+
+
+# -------------------------
+initialize_session_state()
 
 
 # -------------------------
@@ -93,10 +117,7 @@ if "last_mode" not in st.session_state:
     st.session_state.last_mode = mode_sql
 
 if st.session_state.last_mode != mode_sql:
-    st.session_state.result = None
-    st.session_state.sql = None
-    st.session_state.last_error = None
-    st.session_state.last_attempted_sql = None
+    reset_kpi_chat_state()
     st.session_state.last_mode = mode_sql
 
 st.divider()
@@ -110,6 +131,138 @@ if not mode_sql:
 
     with st.sidebar:
 
+        st.header("Session")
+
+        st.divider()
+
+        st.caption(
+            "Chat history and SQL drafts stay isolated to this Streamlit session."
+        )
+
+        if st.button("Clear Chat", use_container_width=True):
+            reset_kpi_chat_state()
+            st.rerun()
+
+    col1, col2 = st.columns([1, 2], gap="large")
+
+    with col1:
+
+        st.markdown("### Select Tables")
+
+        selected_tables = st.multiselect(
+            "Choose tables",
+            options=all_tables,
+            placeholder="Search tables from im_dwh_rpt"
+        )
+
+        if selected_tables:
+            with st.expander("Preview Schema"):
+                preview_context = build_schema_context(schema_df, selected_tables)
+
+                st.text_area(
+                    "Schema Preview",
+                    preview_context,
+                    height=220,
+                    disabled=True
+                )
+
+    with col2:
+        st.markdown("### Report Chat")
+        st.caption("Describe the report, refine it in chat, edit the SQL draft, and run it as many times as needed.")
+
+        if not st.session_state.kpi_chat_messages:
+            st.info("Start by selecting tables, then describe the report you want to build.")
+
+        for message in st.session_state.kpi_chat_messages:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
+
+        chat_prompt = st.chat_input(
+            "Ask for KPIs, filters, joins, or revisions",
+            disabled=not selected_tables,
+            key="kpi_chat_input"
+        )
+
+        if chat_prompt:
+            if not selected_tables:
+                st.warning("Please select at least one table before starting the chat")
+            else:
+                schema_context = build_schema_context(schema_df, selected_tables)
+                append_kpi_chat_message("user", chat_prompt)
+
+                try:
+                    with st.status("Updating SQL draft", expanded=True) as status:
+                        status.write("Reviewing the chat context")
+                        response = generate_sql_chat_response(
+                            schema_context,
+                            selected_tables,
+                            st.session_state.kpi_chat_messages,
+                            current_sql=st.session_state.kpi_sql_draft or None
+                        )
+                        status.write("Refreshing the SQL draft")
+                        status.update(label="SQL draft updated", state="complete")
+
+                    append_kpi_chat_message("assistant", response["assistant_message"])
+                    st.session_state.kpi_sql_draft = response["sql"]
+                    reset_execution_state()
+                    st.rerun()
+                except Exception as exc:
+                    append_kpi_chat_message("assistant", f"I could not update the SQL draft: {exc}")
+                    st.session_state.last_error = str(exc)
+                    st.rerun()
+
+        st.markdown("### Current SQL Draft")
+
+        st.text_area(
+            "Edit the SQL before running it",
+            height=260,
+            key="kpi_sql_draft",
+            placeholder="Your SQL draft will appear here after the chat generates it."
+        )
+
+        action_col1, action_col2 = st.columns(2)
+
+        with action_col1:
+            run_kpi_query = st.button("Run Query", use_container_width=True, type="primary")
+
+        with action_col2:
+            clear_draft = st.button("Clear Draft", use_container_width=True)
+
+        if clear_draft:
+            st.session_state.kpi_sql_draft = ""
+            reset_execution_state()
+            st.rerun()
+
+        if run_kpi_query:
+            draft_sql = st.session_state.kpi_sql_draft.strip()
+
+            if not draft_sql:
+                st.warning("Generate or enter a SQL draft before running the query")
+            else:
+                reset_execution_state()
+                st.session_state.last_attempted_sql = draft_sql
+
+                try:
+                    with st.status("Executing SQL query", expanded=True) as status:
+                        status.write("Sending the SQL draft to Redash")
+                        result = run_sql(draft_sql)
+                        status.update(label="Execution completed", state="complete")
+
+                    st.session_state.result = result
+                    st.session_state.sql = draft_sql
+                    st.success("Query executed successfully")
+                except Exception as exc:
+                    st.session_state.last_error = str(exc)
+                    st.error(str(exc))
+
+
+# ======================================================
+# SQL MODE
+# ======================================================
+
+else:
+
+    with st.sidebar:
         st.header("Settings")
 
         MAX_RETRIES = st.number_input(
@@ -124,151 +277,6 @@ if not mode_sql:
         st.caption(
             "If SQL fails, the system retries by providing error feedback to the model."
         )
-
-    col1, col2, col3 = st.columns(3, gap="large")
-
-    with col1:
-
-        st.markdown("### Select Tables")
-
-        selected_tables = st.multiselect(
-            "Choose tables",
-            options=all_tables,
-            placeholder="Search tables from im_dwh_rpt"
-        )
-
-        if selected_tables:
-
-            with st.expander("Preview Schema"):
-
-                preview_context = build_schema_context(schema_df, selected_tables)
-
-                st.text_area(
-                    "Schema Preview",
-                    preview_context,
-                    height=220,
-                    disabled=True
-                )
-
-    with col2:
-
-        st.markdown("### KPI Definitions")
-
-        kpis = st.text_area(
-            "Define KPIs",
-            height=200,
-            placeholder="""
-Example:
-Daily revenue
-New users per day
-Top categories by sales
-"""
-        )
-
-    with col3:
-
-        st.markdown("### Prompt Box")
-
-        additional_prompt = st.text_area(
-            "Column meanings, flag values, filters, joins and etc.",
-            height=200,
-            placeholder="""""")
-
-    run = st.button("Generate Report", use_container_width=True,type="primary")
-
-
-    # ---------------------------------
-    # GENERATE SQL
-    # ---------------------------------
-
-    if run:
-
-        st.session_state.last_error = None
-        st.session_state.last_attempted_sql = None
-
-        if not selected_tables:
-            st.warning("Please select at least one table")
-            st.stop()
-
-        if not kpis:
-            st.warning("KPI definitions are required")
-            st.stop()
-
-        schema_context = build_schema_context(schema_df, selected_tables)
-
-        attempt = 0
-        last_error = None
-        sql = None
-
-        status = st.status("Running SQL generation", expanded=True)
-
-        while attempt < MAX_RETRIES:
-
-            attempt += 1
-
-            status.write(f"Attempt {attempt}: generating SQL")
-
-            if last_error:
-
-                prompt_kpi = f"""
-KPIs:
-{kpis}
-
-Additional Instructions:
-{additional_prompt}
-
-Previous SQL:
-{sql}
-
-Previous SQL Error:
-{last_error}
-
-Fix the SQL.
-Return only SQL.
-"""
-
-                sql = generate_sql(schema_context, prompt_kpi, "")
-
-            else:
-
-                sql = generate_sql(schema_context, kpis, additional_prompt)
-
-            try:
-
-                status.write("Executing SQL query")
-                st.session_state.last_attempted_sql = sql
-
-                result = run_sql(sql)
-
-                status.update(label="Execution completed", state="complete")
-
-                st.session_state.result = result
-                st.session_state.sql = sql
-                st.session_state.last_error = None
-
-                st.success(f"Query succeeded on attempt {attempt}")
-
-                break
-
-            except Exception as e:
-
-                last_error = str(e)
-                st.session_state.last_error = last_error
-
-                status.write(f"Attempt {attempt} failed")
-                status.write(last_error)
-
-        else:
-
-            status.update(label="Execution failed", state="error")
-            st.error("All retry attempts failed")
-
-
-# ======================================================
-# SQL MODE
-# ======================================================
-
-else:
 
     st.subheader("SQL Query Mode")
 
