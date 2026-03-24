@@ -185,3 +185,38 @@ SQL:
 
     sql = completion.choices[0].message.content.strip()
     return sql.replace("```sql", "").replace("```", "").strip()
+
+
+def generate_column_header_llm(sql_query, frequency, window_start, window_end):
+    client = _get_llm_client()
+
+    prompt = f"""
+You are generating a spreadsheet column header for a SQL reporting window.
+
+Your task is to return a short, human-readable header that reflects the ACTUAL covered dates in the SQL, not just the raw bounds.
+
+Rules:
+- Return only the header text.
+- Keep it concise and spreadsheet-friendly.
+- If the SQL uses an exclusive upper bound like `< TIMESTAMP '2026-03-22 00:00:00'`, the covered end date is the previous day.
+- Weekly ranges should be compact, for example: `15-21 Mar 26`.
+- Daily ranges can be like: `15 Mar 26`.
+- Monthly ranges can be like: `Mar 26` when appropriate.
+- Prefer reflecting the actual SQL semantics over the raw stored dates.
+
+Frequency: {frequency}
+Window start: {window_start}
+Window end: {window_end}
+
+SQL:
+{sql_query}
+"""
+
+    completion = client.chat.completions.create(
+        model="openai/gpt-5.2",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0
+    )
+
+    header = completion.choices[0].message.content.strip()
+    return header.replace("```", "").strip()
