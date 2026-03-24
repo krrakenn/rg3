@@ -10,7 +10,7 @@ import streamlit as st
 from zoneinfo import ZoneInfo
 from utils import get_secret
 from urllib.parse import parse_qs, urlparse
-from sql_generator import generate_column_header_llm, rewrite_sql_date_window_llm
+from sql_generator import analyze_sql_date_window_llm, generate_column_header_llm, rewrite_sql_date_window_llm
 
 AUTOMATION_SHEET_URL = "https://docs.google.com/spreadsheets/d/1pmHIwxTZA2fwfewUBAtW7-UE4Nq3YU1r2DEw5qaQ-XM/edit?gid=0#gid=0"
 AUTOMATION_WORKSHEET_TITLE = "Automations"
@@ -204,8 +204,19 @@ def _get_legacy_window_headers(sql_query, window_start, window_end):
     start_value = _format_iso_date(window_start)
     raw_end_value = _format_iso_date(window_end)
     display_end_value = _get_display_window_end(sql_query, window_start, window_end)
+    found_dates = []
+    seen_dates = set()
+
+    for match in DATE_LITERAL_PATTERN.finditer(sql_query or ""):
+        normalized = f"{match.group(1)}-{match.group(2)}-{match.group(3)}"
+        if normalized not in seen_dates:
+            found_dates.append(normalized)
+            seen_dates.add(normalized)
 
     headers = set()
+
+    if len(found_dates) >= 2:
+        headers.add(f"{found_dates[0]} - {found_dates[1]}")
 
     if start_value and raw_end_value:
         if start_value == raw_end_value:
@@ -222,26 +233,42 @@ def _get_legacy_window_headers(sql_query, window_start, window_end):
     return headers
 
 
-def infer_query_window(sql_query, query_type="no_date"):
-    if query_type != "with_date" or not sql_query:
-        return None, None
-
+def _infer_query_window_from_literals(sql_query):
     found_dates = []
     seen_dates = set()
 
-    for match in DATE_LITERAL_PATTERN.finditer(sql_query):
+    for match in DATE_LITERAL_PATTERN.finditer(sql_query or ""):
         normalized = f"{match.group(1)}-{match.group(2)}-{match.group(3)}"
         if normalized not in seen_dates:
             found_dates.append(normalized)
             seen_dates.add(normalized)
 
     if len(found_dates) >= 2:
-        return found_dates[0], found_dates[1]
+        start_value = found_dates[0]
+        end_value = found_dates[1]
+        display_end_value = _get_display_window_end(sql_query, start_value, end_value)
+        return start_value, display_end_value
 
     if len(found_dates) == 1:
         return found_dates[0], found_dates[0]
 
     return None, None
+
+
+def infer_query_window(sql_query, query_type="no_date"):
+    if query_type != "with_date" or not sql_query:
+        return None, None
+
+    try:
+        analysis = analyze_sql_date_window_llm(sql_query)
+        window_start = analysis.get("window_start")
+        window_end = analysis.get("window_end")
+        if window_start and window_end:
+            return window_start, window_end
+    except Exception:
+        pass
+
+    return _infer_query_window_from_literals(sql_query)
 
 
 def _add_months(value, months):
