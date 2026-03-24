@@ -181,6 +181,47 @@ def _get_display_window_end(sql_query, window_start, window_end):
     return end_date.isoformat()
 
 
+def _format_human_window_header(window_start, window_end):
+    start_date = _parse_iso_date(window_start)
+    end_date = _parse_iso_date(window_end)
+
+    if not start_date or not end_date:
+        return None
+
+    if start_date == end_date:
+        return start_date.strftime("%d %b %y")
+
+    if start_date.year == end_date.year and start_date.month == end_date.month:
+        return f"{start_date.strftime('%d')}-{end_date.strftime('%d %b %y')}"
+
+    if start_date.year == end_date.year:
+        return f"{start_date.strftime('%d %b')}-{end_date.strftime('%d %b %y')}"
+
+    return f"{start_date.strftime('%d %b %y')}-{end_date.strftime('%d %b %y')}"
+
+
+def _get_legacy_window_headers(sql_query, window_start, window_end):
+    start_value = _format_iso_date(window_start)
+    raw_end_value = _format_iso_date(window_end)
+    display_end_value = _get_display_window_end(sql_query, window_start, window_end)
+
+    headers = set()
+
+    if start_value and raw_end_value:
+        if start_value == raw_end_value:
+            headers.add(start_value)
+        else:
+            headers.add(f"{start_value} - {raw_end_value}")
+
+    if start_value and display_end_value:
+        if start_value == display_end_value:
+            headers.add(start_value)
+        else:
+            headers.add(f"{start_value} - {display_end_value}")
+
+    return headers
+
+
 def infer_query_window(sql_query, query_type="no_date"):
     if query_type != "with_date" or not sql_query:
         return None, None
@@ -443,11 +484,15 @@ def generate_column_header(query_type, frequency, window_start=None, window_end=
             except Exception:
                 pass
 
+        display_end_value = _get_display_window_end(sql_query, window_start, window_end)
+        human_header = _format_human_window_header(window_start, display_end_value)
+        if human_header:
+            return human_header
+
         start_value = _format_iso_date(window_start)
-        end_value = _get_display_window_end(sql_query, window_start, window_end)
-        if start_value == end_value:
+        if start_value == display_end_value:
             return start_value
-        return f"{start_value} - {end_value}"
+        return f"{start_value} - {display_end_value}"
 
     today = get_current_ist_datetime()
     
@@ -522,11 +567,28 @@ def write_report_to_sheet(sheet_url, result_df, refresh_frequency, query_type="n
     if column_header in existing_dates:
         date_col = existing_dates[column_header]
     else:
-        date_col = len(existing_dates) + 2
-        batch_updates.append({
-            "range": gspread.utils.rowcol_to_a1(1, date_col),
-            "values": [[column_header]]
-        })
+        legacy_headers = set()
+        if query_type == "with_date" and execution_window_start and execution_window_end:
+            legacy_headers = _get_legacy_window_headers(
+                sql_query,
+                execution_window_start,
+                execution_window_end
+            )
+
+        legacy_match = next((header for header in legacy_headers if header in existing_dates), None)
+
+        if legacy_match:
+            date_col = existing_dates[legacy_match]
+            batch_updates.append({
+                "range": gspread.utils.rowcol_to_a1(1, date_col),
+                "values": [[column_header]]
+            })
+        else:
+            date_col = len(existing_dates) + 2
+            batch_updates.append({
+                "range": gspread.utils.rowcol_to_a1(1, date_col),
+                "values": [[column_header]]
+            })
 
     existing_metrics = get_existing_metrics(ws)
     new_metrics = []
