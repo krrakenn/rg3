@@ -7,6 +7,7 @@ from sheets_automation2 import (
     automate_report,
     format_sheet_timestamp,
     get_current_ist_datetime,
+    infer_query_window_from_sheet_header,
     init_db,
     infer_query_window,
     list_automations,
@@ -127,13 +128,29 @@ def _is_automation_due(now, frequency, last_run=None, schedule_start_date=None):
     return now >= next_due_at
 
 
-def resolve_scheduled_query(sql_query, frequency, query_type, window_start=None, window_end=None):
+def resolve_scheduled_query(sql_query, frequency, query_type, sheet_url=None, window_start=None, window_end=None):
     if query_type != "with_date":
         return sql_query, None, None
 
+    header_window_start = None
+    header_window_end = None
+
+    if sheet_url:
+        try:
+            header_window_start, header_window_end, header_text = infer_query_window_from_sheet_header(
+                sheet_url,
+                frequency
+            )
+            if header_window_start and header_window_end:
+                logger.info(
+                    f"Using previous sheet header '{header_text}' as window {header_window_start} to {header_window_end}"
+                )
+        except Exception as exc:
+            logger.warning(f"Could not infer window from sheet header: {exc}")
+
     inferred_start, inferred_end = infer_query_window(sql_query, query_type)
-    current_window_start = inferred_start or window_start
-    current_window_end = inferred_end or window_end
+    current_window_start = header_window_start or inferred_start or window_start
+    current_window_end = header_window_end or inferred_end or window_end
 
     if not current_window_start or not current_window_end:
         return sql_query, None, None
@@ -216,6 +233,7 @@ def run_automation(automation):
             sql_query,
             frequency,
             query_type,
+            sheet_url=sheet_url,
             window_start=window_start,
             window_end=window_end
         )
