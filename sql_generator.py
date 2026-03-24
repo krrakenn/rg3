@@ -1,4 +1,5 @@
 import os
+import json
 from openai import OpenAI
 from dotenv import load_dotenv
 import streamlit as st
@@ -11,6 +12,23 @@ def _get_llm_client():
         api_key=get_secret("LLM_API_KEY") or os.getenv("LLM_API_KEY"),
         base_url="https://imllm.intermesh.net/v1"
     )
+
+
+def _strip_markdown_fences(value):
+    cleaned = value.strip()
+    cleaned = cleaned.replace("```json", "").replace("```sql", "").replace("```", "")
+    return cleaned.strip()
+
+
+def _extract_json_object(value):
+    cleaned = _strip_markdown_fences(value)
+    start_index = cleaned.find("{")
+    end_index = cleaned.rfind("}")
+
+    if start_index == -1 or end_index == -1 or end_index < start_index:
+        raise ValueError("No JSON object found in LLM response")
+
+    return json.loads(cleaned[start_index:end_index + 1])
 
 def merge_queries_llm(queries):
     client = _get_llm_client()
@@ -160,18 +178,19 @@ def rewrite_sql_date_window_llm(sql_query, current_start, current_end, new_start
     prompt = f"""
 You are an expert SQL editor.
 
-Update the SQL query so that the existing date filter window changes from the current window to the new window.
+Update the SQL query so that the actual covered reporting window changes from the current inclusive window to the new inclusive window.
 
 Rules:
 - Keep the query logic, joins, aliases, filters, formatting, and casing unchanged unless a date literal must change.
-- Only replace the date values that define the current reporting window.
+- Only replace the date values that define the reporting window.
+- Preserve the SQL's date-filter style where appropriate. For example, if the query currently uses an exclusive upper bound like `< TIMESTAMP '2026-03-22 00:00:00'`, keep using an exclusive upper bound for the rewritten query.
 - Do not add comments, explanations, or markdown.
 - Return only SQL.
 
-Current window start: {current_start}
-Current window end: {current_end}
-New window start: {new_start}
-New window end: {new_end}
+Current inclusive window start: {current_start}
+Current inclusive window end: {current_end}
+New inclusive window start: {new_start}
+New inclusive window end: {new_end}
 
 SQL:
 {sql_query}
@@ -187,26 +206,34 @@ SQL:
     return sql.replace("```sql", "").replace("```", "").strip()
 
 
-def generate_column_header_llm(sql_query, frequency, window_start, window_end):
+def analyze_sql_date_window_llm(sql_query, frequency=None):
     client = _get_llm_client()
 
     prompt = f"""
-You are generating a spreadsheet column header for a SQL reporting window.
-
-Your task is to return a short, human-readable header that reflects the ACTUAL covered dates in the SQL, not just the raw bounds.
+You are analyzing a SQL query to determine the ACTUAL reporting window covered by its date filters.
 
 Rules:
-- Return only the header text.
-- Keep it concise and spreadsheet-friendly.
-- If the SQL uses an exclusive upper bound like `< TIMESTAMP '2026-03-22 00:00:00'`, the covered end date is the previous day.
-- Weekly ranges should be compact, for example: `15-21 Mar 26`.
-- Daily ranges can be like: `15 Mar 26`.
-- Monthly ranges can be like: `Mar 26` when appropriate.
-- Prefer reflecting the actual SQL semantics over the raw stored dates.
+- Infer the true covered date range from the SQL itself.
+- The returned window_start and window_end must both be inclusive dates in YYYY-MM-DD format.
+- If the query uses an exclusive upper bound like `< TIMESTAMP '2026-03-22 00:00:00'`, then the inclusive end date is 2026-03-21.
+- If the query uses `<=` on an end date, that end date remains inclusive.
+- Prefer the main reporting window used by the query.
+- Return ONLY valid JSON.
 
-Frequency: {frequency}
-Window start: {window_start}
-Window end: {window_end}
+Return this exact JSON shape:
+{{
+  "window_start": "YYYY-MM-DD or null",
+  "window_end": "YYYY-MM-DD or null",
+  "header": "short spreadsheet header or null"
+}}
+
+Header rules:
+- Weekly example: `15-21 Mar 26`
+- Daily example: `15 Mar 26`
+- Monthly example: `Mar 26`
+- Use the actual inclusive covered dates, not raw SQL bounds.
+
+Frequency: {frequency or "unknown"}
 
 SQL:
 {sql_query}
@@ -218,5 +245,10 @@ SQL:
         temperature=0
     )
 
-    header = completion.choices[0].message.content.strip()
-    return header.replace("```", "").strip()
+    payload = completion.choices[0].message.content.strip()
+    return _extract_json_object(payload)
+
+
+def generate_column_header_llm(sql_query, frequency, window_start, window_end):
+    analysis = analyze_sql_date_window_llm(sql_query, frequency=frequency)
+    return (analysis.get("header") or "").strip()
