@@ -225,12 +225,6 @@ if not mode_sql:
             placeholder="Your SQL draft will appear here after the chat generates it."
         )
 
-        st.markdown("### SQL Preview")
-        st.code(
-            st.session_state.kpi_sql_draft or "-- Your SQL draft will appear here after the chat generates it.",
-            language="sql"
-        )
-
         action_col1, action_col2 = st.columns(2)
 
         with action_col1:
