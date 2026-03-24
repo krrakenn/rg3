@@ -85,6 +85,26 @@ def _is_automation_due(now, frequency, last_run=None, schedule_start_date=None):
         if not last_run_dt:
             return True
 
+        freq = frequency.lower()
+
+        if freq == "daily":
+            return (
+                last_run_dt.date() < latest_scheduled_date
+                and (now - last_run_dt) >= timedelta(days=1)
+            )
+        
+        if freq == "weekly":
+            return (
+                last_run_dt.date() < latest_scheduled_date
+                and (now - last_run_dt) >= timedelta(days=7)
+            )
+        
+        if freq == "monthly":
+            return (
+                last_run_dt.date() < latest_scheduled_date
+                and (now - last_run_dt) >= timedelta(days=28)
+            )
+        
         return last_run_dt.date() < latest_scheduled_date
 
     if not last_run_dt:
