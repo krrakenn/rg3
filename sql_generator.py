@@ -5,12 +5,15 @@ import streamlit as st
 from utils import get_secret
 load_dotenv()
 
-def merge_queries_llm(queries):
 
-    client = OpenAI(
-        api_key=get_secret("LLM_API_KEY"),
+def _get_llm_client():
+    return OpenAI(
+        api_key=get_secret("LLM_API_KEY") or os.getenv("LLM_API_KEY"),
         base_url="https://imllm.intermesh.net/v1"
     )
+
+def merge_queries_llm(queries):
+    client = _get_llm_client()
 
     queries_text = "\n\n".join(queries)
 
@@ -47,56 +50,99 @@ Return ONLY SQL.
 
 
 def generate_sql(schema_context, kpis, additional_prompt):
-
-    client = OpenAI(
-        api_key=os.getenv("LLM_API_KEY"),
-        base_url="https://imllm.intermesh.net/v1"
-    )
+    client = _get_llm_client()
 
     prompt = f"""
-You are a senior analytics engineer writing production-safe SQL.
+You are an expert analytics engineer and SQL developer.
 
-Your task is to generate ONE SQL query for the requested KPIs using ONLY the provided schema context.
+Your task is to generate ONE SQL query that calculates ALL the requested KPIs.
 
-Non-negotiable rules:
-1. Use only tables from im_dwh_rpt and only columns present in the schema context.
-2. Do not invent columns, relationships, filters, dimensions, or business logic.
-3. Do not guess joins.
-4. Join tables only when:
-   - the join is necessary for the KPI, and
-   - the join keys are explicitly visible in the schema context, and
-   - the join will not create obvious fanout risk.
-5. If the schema is ambiguous, prefer the safest single-table query instead of a risky multi-table join.
-6. Never directly join multiple fact-like tables unless the join path is explicitly stated in the instructions.
-7. If combining multiple sources is necessary, aggregate each source in a CTE first, then join the aggregated CTEs.
-8. Prefer COUNT(DISTINCT ...) when duplicate expansion is possible.
-9. Return all KPIs in one final row.
-10. Alias each KPI exactly as requested.
-11. Return only SQL. No explanation, no comments, no markdown.
+You must strictly follow the rules below.
 
-Decision policy:
-- First determine the base table for each KPI.
-- Use dimension tables only for descriptive enrichment or filters.
-- If two candidate tables look similar, choose the one that most directly matches the KPI grain.
-- If a join is not explicit, do not infer it from naming similarity alone.
+------------------------
+CRITICAL RULES
+------------------------
 
-Required SQL style:
-- Use CTEs for intermediate logic.
-- No SELECT *.
-- Fully qualify all table names as im_dwh_rpt.table_name.
-- Keep the query minimal and deterministic.
+1. ONLY use tables from the schema: im_dwh_rpt
+2. ALWAYS reference tables using the fully qualified format:
+   im_dwh_rpt.table_name
 
-SCHEMA CONTEXT:
+3. ONLY use columns that exist in the provided schema context.
+   - DO NOT invent columns
+   - DO NOT assume columns
+   - DO NOT use external knowledge
+
+4. Carefully read:
+   - The schema context
+   - The KPI definitions
+   - The additional instructions
+
+5. When selecting columns:
+   - Choose the column that BEST matches the KPI definition
+   - Prefer columns explicitly referenced in the additional instructions
+   - Use the MINIMUM number of columns necessary
+
+6. If multiple tables contain similar columns:
+   - Select the table whose structure most closely matches the KPI definition
+
+7. Return ALL KPIs in ONE result ROW.
+
+8. Each KPI must be returned as a column with the exact KPI name as the alias.
+
+Example format:
+
+SELECT
+    <metric_calculation> AS kpi_1,
+    <metric_calculation> AS kpi_2,
+    <metric_calculation> AS kpi_3
+FROM ...
+
+9. Use JOINs only when required.
+
+10. Do NOT include:
+    - explanations
+    - comments
+    - markdown
+    - extra text
+
+Return ONLY the SQL query.
+
+------------------------
+REASONING PROCESS (INTERNAL)
+------------------------
+
+Before writing the SQL query:
+
+1. Identify which schema tables contain relevant data.
+2. Identify the columns required to compute each KPI.
+3. Verify that those columns exist in the schema context.
+4. Determine necessary joins between tables.
+5. Construct the SQL query that calculates all KPIs in one result.
+
+Do NOT output this reasoning.
+
+------------------------
+SCHEMA CONTEXT
+------------------------
 {schema_context}
 
-KPI DEFINITIONS:
+------------------------
+KPI DEFINITIONS
+------------------------
 {kpis}
 
-ADDITIONAL INSTRUCTIONS:
+------------------------
+ADDITIONAL INFORMATION
+------------------------
 {additional_prompt}
 
-Return only one SQL query.
+------------------------
+FINAL OUTPUT
+------------------------
+
+Return ONLY ONE SQL query.
 """
+
     completion = client.chat.completions.create(
         model="openai/gpt-5.2",
         messages=[{"role": "user", "content": prompt}],
@@ -106,3 +152,36 @@ Return only one SQL query.
     sql = completion.choices[0].message.content.strip()
     sql = sql.replace("```sql", "").replace("```", "").strip()
     return sql
+
+
+def rewrite_sql_date_window_llm(sql_query, current_start, current_end, new_start, new_end):
+    client = _get_llm_client()
+
+    prompt = f"""
+You are an expert SQL editor.
+
+Update the SQL query so that the existing date filter window changes from the current window to the new window.
+
+Rules:
+- Keep the query logic, joins, aliases, filters, formatting, and casing unchanged unless a date literal must change.
+- Only replace the date values that define the current reporting window.
+- Do not add comments, explanations, or markdown.
+- Return only SQL.
+
+Current window start: {current_start}
+Current window end: {current_end}
+New window start: {new_start}
+New window end: {new_end}
+
+SQL:
+{sql_query}
+"""
+
+    completion = client.chat.completions.create(
+        model="openai/gpt-5.2",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0
+    )
+
+    sql = completion.choices[0].message.content.strip()
+    return sql.replace("```sql", "").replace("```", "").strip()
