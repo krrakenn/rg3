@@ -172,6 +172,65 @@ Return ONLY ONE SQL query.
     return sql
 
 
+def generate_sql_chat_response(schema_context, selected_tables, chat_history, current_sql=None):
+    client = _get_llm_client()
+
+    formatted_history = []
+    for message in chat_history:
+        role = (message.get("role") or "user").upper()
+        content = (message.get("content") or "").strip()
+        if content:
+            formatted_history.append(f"{role}: {content}")
+
+    history_text = "\n\n".join(formatted_history) or "No conversation yet."
+    selected_tables_text = ", ".join(selected_tables)
+
+    prompt = f"""
+You are an expert analytics engineer and SQL developer helping a user build a report conversationally.
+
+Your task is to read the full chat history, understand the latest user request, and return:
+1. a short assistant reply
+2. the latest SQL draft
+
+Rules:
+- Use only schema im_dwh_rpt.
+- Use only tables and columns supported by the provided schema context.
+- Keep the assistant reply short and practical.
+- If the user is refining an existing report, update the current SQL draft instead of starting over unless the request clearly changes the report.
+- Return only valid JSON.
+- Do not wrap the response in markdown.
+
+Return this exact JSON shape:
+{{
+  "assistant_message": "short reply",
+  "sql": "full SQL query"
+}}
+
+Selected tables: {selected_tables_text}
+
+Schema context:
+{schema_context}
+
+Current SQL draft:
+{current_sql or "None"}
+
+Chat history:
+{history_text}
+"""
+
+    completion = client.chat.completions.create(
+        model="openai/gpt-5.2",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0
+    )
+
+    payload = completion.choices[0].message.content.strip()
+    response = _extract_json_object(payload)
+    response["assistant_message"] = (response.get("assistant_message") or "Updated the SQL draft.").strip()
+    response["sql"] = _strip_markdown_fences(response.get("sql") or "")
+    return response
+
+
 def rewrite_sql_date_window_llm(sql_query, current_start, current_end, new_start, new_end):
     client = _get_llm_client()
 
