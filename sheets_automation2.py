@@ -10,7 +10,7 @@ import streamlit as st
 from zoneinfo import ZoneInfo
 from utils import get_secret
 from urllib.parse import parse_qs, urlparse
-from sql_generator import rewrite_sql_date_window_llm
+from sql_generator import generate_column_header_llm, rewrite_sql_date_window_llm
 
 AUTOMATION_SHEET_URL = "https://docs.google.com/spreadsheets/d/1pmHIwxTZA2fwfewUBAtW7-UE4Nq3YU1r2DEw5qaQ-XM/edit?gid=0#gid=0"
 AUTOMATION_WORKSHEET_TITLE = "Automations"
@@ -430,6 +430,19 @@ def get_existing_dates(ws):
 
 def generate_column_header(query_type, frequency, window_start=None, window_end=None, sql_query=None):
     if query_type == "with_date" and window_start and window_end:
+        if sql_query:
+            try:
+                llm_header = generate_column_header_llm(
+                    sql_query,
+                    frequency,
+                    window_start,
+                    window_end
+                )
+                if llm_header:
+                    return llm_header
+            except Exception:
+                pass
+
         start_value = _format_iso_date(window_start)
         end_value = _get_display_window_end(sql_query, window_start, window_end)
         if start_value == end_value:
