@@ -249,6 +249,40 @@ SQL:
     return _extract_json_object(payload)
 
 
+def analyze_sheet_header_window_llm(header_text, frequency=None):
+    client = _get_llm_client()
+
+    prompt = f"""
+You are analyzing a spreadsheet column header that represents a reporting period.
+
+Rules:
+- Infer the inclusive reporting window represented by the header text.
+- Return ONLY valid JSON.
+- window_start and window_end must be inclusive dates in YYYY-MM-DD format.
+- If the header is ambiguous, use the provided frequency to infer the most reasonable window.
+- If the header does not contain a usable reporting period, return null values.
+
+Return this exact JSON shape:
+{{
+  "window_start": "YYYY-MM-DD or null",
+  "window_end": "YYYY-MM-DD or null"
+}}
+
+Frequency: {frequency or "unknown"}
+Header:
+{header_text}
+"""
+
+    completion = client.chat.completions.create(
+        model="openai/gpt-5.2",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0
+    )
+
+    payload = completion.choices[0].message.content.strip()
+    return _extract_json_object(payload)
+
+
 def generate_column_header_llm(sql_query, frequency, window_start, window_end):
     analysis = analyze_sql_date_window_llm(sql_query, frequency=frequency)
     return (analysis.get("header") or "").strip()
